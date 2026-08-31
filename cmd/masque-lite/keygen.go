@@ -4,17 +4,28 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 )
 
 func keygen() {
-	k, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if e != nil {
-		panic(e)
+	privateKey, publicKey, err := generateClientKey()
+	if err != nil {
+		panic(err)
 	}
-	raw := make([]byte, 32)
-	k.D.FillBytes(raw)
-	pub := elliptic.Marshal(elliptic.P256(), k.PublicKey.X, k.PublicKey.Y)
-	fmt.Printf("private-key: %s\npublic-key: %s\n", base64.StdEncoding.EncodeToString(raw), base64.StdEncoding.EncodeToString(pub))
+	fmt.Printf("private-key: %s\npublic-key: %s\n", privateKey, publicKey)
+}
+
+func generateClientKey() (privateKey, publicKey string, err error) {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", err
+	}
+	privateDER, err := x509.MarshalECPrivateKey(k)
+	if err != nil {
+		return "", "", err
+	}
+	public := elliptic.Marshal(elliptic.P256(), k.PublicKey.X, k.PublicKey.Y)
+	return base64.StdEncoding.EncodeToString(privateDER), base64.StdEncoding.EncodeToString(public), nil
 }

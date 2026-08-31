@@ -13,7 +13,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o mas
 ./masque-lite keygen
 ```
 
-`keygen` emits a P-256 client key pair in Mihomo's base64 format. Put the public value in `client.public_keys` and the private value in Mihomo's `private-key`. Mihomo's `public-key` is the server certificate's pinned P-256 public key.
+`keygen` emits a P-256 client key pair. Its `private-key` is base64-encoded SEC1 ASN.1 DER and goes directly in Mihomo's `private-key`. Its `public-key` is an uncompressed P-256 key and goes in the server `config.yaml` `client.public_keys` whitelist.
 
 Generate a separate P-256 ECDSA server certificate for masque-lite. Do not use an RSA wildcard certificate:
 
@@ -21,7 +21,7 @@ Generate a separate P-256 ECDSA server certificate for masque-lite. Do not use a
 masque-lite server-keygen -cert /etc/masque-lite/server.crt -key /etc/masque-lite/server.key
 ```
 
-The command writes the private key only to the requested file, prints the certificate path and a base64 PKIX `public-key`, and refuses to overwrite existing files. Use the printed `public-key` in Mihomo. This self-signed certificate is intentionally independent of Nginx and other services because Mihomo pins the server public key.
+The command writes the private key only to the requested file, prints the certificate path and a base64 PKIX `public-key`, and refuses to overwrite existing files. Use this server `public-key` in Mihomo's node `public-key` field. This self-signed certificate is intentionally independent of Nginx and other services because Mihomo pins the server public key.
 
 ## Mihomo example
 
