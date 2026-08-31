@@ -47,13 +47,10 @@ sudo sysctl -w net.ipv4.ip_forward=1
 sudo nft add table ip masque_lite
 sudo nft 'add chain ip masque_lite postrouting { type nat hook postrouting priority srcnat; policy accept; }'
 sudo nft add rule ip masque_lite postrouting oifname "eth0" ip saddr 192.0.2.0/30 masquerade
-sudo systemctl enable masque-lite
-sudo systemctl start masque-lite
-sudo ip addr add 192.0.2.1/30 dev masque0
-sudo ip link set masque0 mtu 1280 up
+sudo systemctl enable --now masque-lite
 ```
 
-Replace `eth0` and the tunnel subnet as needed. The service does not modify sysctl or firewall state.
+Replace `eth0` and the tunnel subnet as needed. At startup, masque-lite configures `masque0` itself from `server.tunnel_ipv4` and `server.mtu`, including the IPv4 address, netmask, MTU, and UP flag. The service does not modify sysctl or firewall state.
 
 ## Validation and memory
 

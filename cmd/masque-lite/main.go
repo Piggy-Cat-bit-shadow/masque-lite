@@ -48,9 +48,11 @@ func main() {
 	active := false
 	tc.VerifyConnection = func(cs tls.ConnectionState) error {
 		if len(cs.PeerCertificates) != 1 {
+			log.Printf("client certificate authentication failed: certificate count")
 			return fmt.Errorf("exactly one client certificate required")
 		}
 		if !auth.Matches(cs.PeerCertificates[0], c.Client.PublicKeys) {
+			log.Printf("client certificate authentication failed: public key not authorized")
 			return fmt.Errorf("client certificate public key is not authorized")
 		}
 		return nil
@@ -60,6 +62,13 @@ func main() {
 		log.Fatal(e)
 	}
 	defer tun.Close()
+	serverPrefix, e := netip.ParsePrefix(c.Server.TunnelIPv4)
+	if e != nil {
+		log.Fatal(e)
+	}
+	if e = tun.Configure(serverPrefix); e != nil {
+		log.Fatal("configure masque0:", e)
+	}
 	ln, e := net.ListenPacket("udp", c.Listen)
 	if e != nil {
 		log.Fatal(e)
@@ -76,6 +85,7 @@ func main() {
 		defer func() { sessionMu.Lock(); active = false; sessionMu.Unlock() }()
 		parseProtocol, ok := protocolForParse(r.Proto)
 		if !ok {
+			log.Printf("CONNECT-IP session rejected: unsupported protocol %q", r.Proto)
 			mh.Error(w, "only CONNECT-IP is supported", mh.StatusNotImplemented)
 			return
 		}
@@ -83,19 +93,23 @@ func main() {
 		requestForParse.Proto = parseProtocol
 		req, e := connectip.ParseRequest(&requestForParse, uritemplate.MustNew("https://"+r.Host+"/connect-ip"))
 		if e != nil {
+			log.Printf("CONNECT-IP request parse failed: %v", e)
 			mh.Error(w, e.Error(), mh.StatusBadRequest)
 			return
 		}
 		conn, e := (&connectip.Proxy{}).Proxy(w, req)
 		if e != nil {
+			log.Printf("CONNECT-IP tunnel establishment failed: %v", e)
 			return
 		}
 		clientPrefix, _ := netip.ParsePrefix(c.Client.TunnelIPv4)
 		if e = conn.AssignAddresses(r.Context(), []netip.Prefix{clientPrefix}); e != nil {
+			log.Printf("CONNECT-IP address assignment failed: %v", e)
 			conn.Close()
 			return
 		}
 		if e = conn.AdvertiseRoute(r.Context(), []connectip.IPRoute{{StartIP: netip.MustParseAddr("0.0.0.0"), EndIP: netip.MustParseAddr("255.255.255.255")}}); e != nil {
+			log.Printf("CONNECT-IP route advertisement failed: %v", e)
 			conn.Close()
 			return
 		}
@@ -104,12 +118,18 @@ func main() {
 			for {
 				n, er := tun.Read(buf)
 				if er != nil {
+					if r.Context().Err() == nil {
+						log.Printf("TUN read failed: %v", er)
+					}
 					return
 				}
 				if n > c.Server.MTU {
 					continue
 				}
 				if _, er = conn.WritePacket(buf[:n]); er != nil {
+					if r.Context().Err() == nil {
+						log.Printf("CONNECT-IP packet write failed: %v", er)
+					}
 					return
 				}
 			}
@@ -118,12 +138,18 @@ func main() {
 			for {
 				pkt, er := conn.ReadPacket()
 				if er != nil {
+					if r.Context().Err() == nil {
+						log.Printf("HTTP/3 CONNECT-IP session closed: %v", er)
+					}
 					return
 				}
 				if len(pkt) > c.Server.MTU {
 					continue
 				}
 				if _, er = tun.Write(pkt); er != nil {
+					if r.Context().Err() == nil {
+						log.Printf("TUN write failed: %v", er)
+					}
 					return
 				}
 			}
