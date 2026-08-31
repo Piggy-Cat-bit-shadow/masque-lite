@@ -18,3 +18,8 @@ client:
 server:
   tunnel_ipv4: 192.0.2.1/30
   mtu: 1280
+  # Optional: allow same visible IP to use concurrent sessions.
+  # session_nat:
+  #   enabled: true
+  #   pool: 192.0.2.128/25
+  #   max_sessions: 120

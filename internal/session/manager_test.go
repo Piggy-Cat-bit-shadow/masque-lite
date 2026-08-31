@@ -49,3 +49,32 @@ func TestManagerQueueIsBounded(t *testing.T) {
 	}
 	s.Close()
 }
+
+func TestShadowManagerAllowsSameVisibleIP(t *testing.T) {
+	pool := netip.MustParsePrefix("192.0.2.128/30")
+	m := NewShadowManager(pool, 2, nil)
+	a := New(netip.MustParseAddr("192.0.2.2"), "a", &fakeConn{}, func(x *Session) { m.RemoveIfCurrent(x) })
+	b := New(netip.MustParseAddr("192.0.2.2"), "b", &fakeConn{}, func(x *Session) { m.RemoveIfCurrent(x) })
+	if err := m.Register(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Register(b); err != nil {
+		t.Fatal(err)
+	}
+	if a.ShadowIP == b.ShadowIP || m.Len() != 2 {
+		t.Fatalf("shadow sessions = %s, %s; len=%d", a.ShadowIP, b.ShadowIP, m.Len())
+	}
+	if m.Lookup(a.ShadowIP) != a || m.Lookup(b.ShadowIP) != b {
+		t.Fatal("shadow lookup mismatch")
+	}
+	a.Close()
+	if m.Lookup(a.ShadowIP) != nil || m.Lookup(b.ShadowIP) != b {
+		t.Fatal("closing A affected B")
+	}
+	c := New(netip.MustParseAddr("192.0.2.2"), "c", &fakeConn{}, func(x *Session) { m.RemoveIfCurrent(x) })
+	if err := m.Register(c); err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	b.Close()
+}

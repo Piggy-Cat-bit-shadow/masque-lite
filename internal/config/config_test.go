@@ -35,3 +35,20 @@ func TestMultiClientValidation(t *testing.T) {
 		t.Fatal("expected duplicate key to fail")
 	}
 }
+
+func TestSessionNatValidation(t *testing.T) {
+	key := "BIU3CobtJ5y6P+wvKc7M1XBfS5FhcvLeVkPhObW4s5QY4UvNYuKxtYrZF+4eCxv2AW4OmvowLmN1v6CQVsJ+f9M="
+	c := Config{
+		Listen: "127.0.0.1:4433",
+		TLS:    TLS{Cert: "c", Key: "k"},
+		Client: Client{PublicKeys: []string{key}, TunnelIPv4: "192.0.2.2/32"},
+		Server: Server{TunnelIPv4: "192.0.2.1/24", SessionNat: SessionNat{Enabled: true, Pool: "192.0.2.128/25", MaxSessions: 120}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c.Server.SessionNat.Pool = "192.0.2.0/25"
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected pool containing server address to fail")
+	}
+}

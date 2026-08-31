@@ -31,8 +31,14 @@ type ResolvedClient struct {
 	TunnelIPv4 netip.Prefix
 }
 type Server struct {
-	TunnelIPv4 string `yaml:"tunnel_ipv4"`
-	MTU        int    `yaml:"mtu"`
+	TunnelIPv4 string     `yaml:"tunnel_ipv4"`
+	MTU        int        `yaml:"mtu"`
+	SessionNat SessionNat `yaml:"session_nat,omitempty"`
+}
+type SessionNat struct {
+	Enabled     bool   `yaml:"enabled"`
+	Pool        string `yaml:"pool"`
+	MaxSessions int    `yaml:"max_sessions"`
 }
 
 func Load(path string) (Config, error) {
@@ -46,6 +52,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.Server.MTU == 0 {
 		c.Server.MTU = 1280
+	}
+	if c.Server.SessionNat.Enabled && c.Server.SessionNat.MaxSessions == 0 {
+		c.Server.SessionNat.MaxSessions = 120
 	}
 	return c, c.Validate()
 }
@@ -62,8 +71,41 @@ func (c Config) Validate() error {
 	if _, e := c.ResolvedClients(); e != nil {
 		return e
 	}
+	if c.Server.SessionNat.Enabled {
+		pool, e := netip.ParsePrefix(c.Server.SessionNat.Pool)
+		if e != nil || !pool.Addr().Is4() {
+			return fmt.Errorf("invalid session_nat.pool")
+		}
+		server, _ := netip.ParsePrefix(c.Server.TunnelIPv4)
+		poolLast := pool.Masked().Addr()
+		for i := uint64(1); i < uint64(1)<<uint(32-pool.Bits()); i++ {
+			poolLast = poolLast.Next()
+		}
+		if !server.Contains(pool.Masked().Addr()) || !server.Contains(poolLast) {
+			return fmt.Errorf("session_nat.pool must be inside server network")
+		}
+		if pool.Contains(server.Addr()) {
+			return fmt.Errorf("session_nat.pool must not contain server tunnel address")
+		}
+		if c.Server.SessionNat.MaxSessions <= 0 {
+			return fmt.Errorf("session_nat.max_sessions must be positive")
+		}
+		available := uint64(1) << uint(32-pool.Bits())
+		if available > 2 {
+			available -= 2
+		}
+		for _, cl := range mustResolved(c) {
+			if pool.Contains(cl.TunnelIPv4.Addr()) && available > 0 {
+				available--
+			}
+		}
+		if uint64(c.Server.SessionNat.MaxSessions) > available {
+			return fmt.Errorf("session_nat.max_sessions exceeds available shadow addresses")
+		}
+	}
 	return nil
 }
+func mustResolved(c Config) []ResolvedClient { v, _ := c.ResolvedClients(); return v }
 
 func (c Config) ResolvedClients() ([]ResolvedClient, error) {
 	server, e := netip.ParsePrefix(c.Server.TunnelIPv4)

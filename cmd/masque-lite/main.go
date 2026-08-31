@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/auth"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/config"
+	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/packet"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/session"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/tunnel"
 	connectip "github.com/metacubex/connect-ip-go"
@@ -49,6 +51,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	for i := range clients {
+		if clients[i].Name == "" {
+			sum := sha256.Sum256([]byte(clients[i].PublicKeys[0]))
+			clients[i].Name = "client/" + fmt.Sprintf("%x", sum[:6])
+		}
+	}
 	byKey := make(map[string]config.ResolvedClient)
 	for _, cl := range clients {
 		for _, key := range cl.PublicKeys {
@@ -83,7 +91,18 @@ func run() error {
 		return err
 	}
 	defer ln.Close()
-	mgr := session.NewManager()
+	var mgr *session.Manager
+	if c.Server.SessionNat.Enabled {
+		pool, _ := netip.ParsePrefix(c.Server.SessionNat.Pool)
+		excluded := make([]netip.Addr, 0, len(clients)+1)
+		excluded = append(excluded, serverPrefix.Addr())
+		for _, cl := range clients {
+			excluded = append(excluded, cl.TunnelIPv4.Addr())
+		}
+		mgr = session.NewShadowManager(pool, c.Server.SessionNat.MaxSessions, excluded)
+	} else {
+		mgr = session.NewManager()
+	}
 	fatal := make(chan error, 2)
 	go tunDispatcher(tun, mgr, c.Server.MTU, fatal)
 	qc := &quic.Config{EnableDatagrams: true, HandshakeIdleTimeout: 10 * time.Second, MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 15 * time.Second}
@@ -156,11 +175,20 @@ func handleRequest(w mh.ResponseWriter, r *mh.Request, c config.Config, byKey ma
 		return
 	}
 	s := session.NewWithContext(r.Context(), client.TunnelIPv4.Addr(), client.Name, conn, func(x *session.Session) { mgr.RemoveIfCurrent(x) })
-	go sessionWriter(s, tun, c.Server.MTU)
-	old := mgr.Replace(s)
-	if old != nil {
-		log.Printf("client %s session takeover", client.Name)
+	if mgr.IsShadow() {
+		if err := mgr.Register(s); err != nil {
+			log.Printf("session register failed for %s: %v", client.Name, err)
+			s.Close()
+			mh.Error(w, "session capacity unavailable", mh.StatusServiceUnavailable)
+			return
+		}
+	} else {
+		old := mgr.Replace(s)
+		if old != nil {
+			log.Printf("client %s session takeover", client.Name)
+		}
 	}
+	go sessionWriter(s, tun, c.Server.MTU)
 	log.Printf("client %s session established", client.Name)
 	go sessionReader(s, tun, c.Server.MTU)
 	select {
@@ -179,10 +207,7 @@ func tunDispatcher(tun *tunnel.Device, mgr *session.Manager, mtu int, fatal chan
 			fatal <- fmt.Errorf("TUN dispatcher: %w", err)
 			return
 		}
-		if n > mtu {
-			continue
-		}
-		dst, ok := ipv4Destination(buf[:n])
+		dst, ok := packet.Destination(buf[:n])
 		if !ok {
 			continue
 		}
@@ -191,6 +216,15 @@ func tunDispatcher(tun *tunnel.Device, mgr *session.Manager, mtu int, fatal chan
 			continue
 		}
 		pkt := append([]byte(nil), buf[:n]...)
+		if mgr.IsShadow() {
+			if pkt[9] == 1 {
+				if !packet.TranslateICMP(pkt, s.VisibleIP, s.ShadowIP, false) {
+					continue
+				}
+			} else if !packet.RewriteDestinationIPv4(pkt, s.ShadowIP, s.VisibleIP) {
+				continue
+			}
+		}
 		select {
 		case s.Outbound <- pkt:
 		default:
@@ -203,11 +237,11 @@ func sessionWriter(s *session.Session, tun *tunnel.Device, mtu int) {
 		case <-s.Ctx.Done():
 			return
 		case pkt := <-s.Outbound:
-			if len(pkt) > mtu {
-				continue
-			}
 			icmp, err := s.Conn.WritePacket(pkt)
 			if len(icmp) > 0 {
+				if s.ShadowIP.IsValid() && s.ShadowIP != s.VisibleIP && !packet.TranslateICMP(icmp, s.VisibleIP, s.ShadowIP, true) {
+					continue
+				}
 				if _, werr := tun.Write(icmp); werr != nil {
 					log.Printf("client %s ICMP write failed: %v", s.Identity, werr)
 					s.Close()
@@ -230,11 +264,8 @@ func sessionReader(s *session.Session, tun *tunnel.Device, mtu int) {
 			s.Close()
 			return
 		}
-		if len(pkt) > mtu {
-			continue
-		}
-		src, ok := ipv4Source(pkt)
-		if !ok || src != s.ClientIP {
+		src, ok := packet.Source(pkt)
+		if !ok || src != s.VisibleIP {
 			continue
 		}
 		select {
@@ -242,24 +273,21 @@ func sessionReader(s *session.Session, tun *tunnel.Device, mtu int) {
 			return
 		default:
 		}
+		if s.ShadowIP.IsValid() && s.ShadowIP != s.VisibleIP {
+			if pkt[9] == 1 {
+				if !packet.TranslateICMP(pkt, s.VisibleIP, s.ShadowIP, true) {
+					continue
+				}
+			} else if !packet.RewriteSourceIPv4(pkt, s.VisibleIP, s.ShadowIP) {
+				continue
+			}
+		}
 		if _, err = tun.Write(pkt); err != nil {
 			log.Printf("client %s TUN write failed: %v", s.Identity, err)
 			s.Close()
 			return
 		}
 	}
-}
-func ipv4Destination(pkt []byte) (netip.Addr, bool) {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 || int(pkt[0]&15)*4 < 20 || int(pkt[0]&15)*4 > len(pkt) {
-		return netip.Addr{}, false
-	}
-	return netip.AddrFrom4([4]byte{pkt[16], pkt[17], pkt[18], pkt[19]}), true
-}
-func ipv4Source(pkt []byte) (netip.Addr, bool) {
-	if len(pkt) < 20 || pkt[0]>>4 != 4 || int(pkt[0]&15)*4 < 20 || int(pkt[0]&15)*4 > len(pkt) {
-		return netip.Addr{}, false
-	}
-	return netip.AddrFrom4([4]byte{pkt[12], pkt[13], pkt[14], pkt[15]}), true
 }
 func protocolForParse(protocol string) (string, bool) {
 	switch protocol {

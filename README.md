@@ -109,6 +109,20 @@ server:
 
 Do not configure both blocks. A same-IP reconnect takes over the previous session; different tunnel IPs remain concurrent. Expand the host NAT/firewall rule when expanding the subnet. The service uses one TUN reader and bounded per-session queues, and does not implement a userspace TCP/IP stack.
 
+To allow multiple simultaneous sessions that intentionally share the same visible client IP, enable the bounded shadow pool:
+
+```yaml
+server:
+  tunnel_ipv4: 192.0.2.1/24
+  mtu: 1280
+  session_nat:
+    enabled: true
+    pool: 192.0.2.128/25
+    max_sessions: 120
+```
+
+Each session then receives a unique internal shadow address from the pool. Packets are rewritten at the TUN boundary so Linux conntrack can distinguish concurrent flows; the visible Mihomo configuration remains unchanged. The pool must be inside the server network and must leave room for network/broadcast addresses. With `session_nat` disabled or absent, legacy same-IP newest-session-wins behavior remains active.
+
 ## Validation and memory
 
 Go unit tests and a Linux amd64 build are automated. VPS testing must still verify Mihomo setup, TCP/UDP/DNS/QUIC traffic, reconnect, restart recovery, MTU behavior, and packet-loop absence:
