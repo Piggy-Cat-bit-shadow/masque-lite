@@ -31,6 +31,7 @@ func TestMultiClientValidation(t *testing.T) {
 	}
 	c.Clients[1].TunnelIPv4 = "192.0.2.3/32"
 	c.Clients[1].PublicKeys = []string{keyA}
+	c.Clients[1].TunnelIPv4 = "192.0.2.4/32"
 	if _, err := c.ResolvedClients(); err == nil {
 		t.Fatal("expected duplicate key to fail")
 	}
@@ -42,7 +43,7 @@ func TestSessionNatValidation(t *testing.T) {
 		Listen: "127.0.0.1:4433",
 		TLS:    TLS{Cert: "c", Key: "k"},
 		Client: Client{PublicKeys: []string{key}, TunnelIPv4: "192.0.2.2/32"},
-		Server: Server{TunnelIPv4: "192.0.2.1/24", SessionNat: SessionNat{Enabled: true, Pool: "192.0.2.128/25", MaxSessions: 120}},
+		Server: Server{TunnelIPv4: "192.0.2.1/24", SessionNat: SessionNat{Enabled: true, Pool: "192.0.2.128/25", MaxSessions: 120, ReuseDelay: "30m"}},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)

@@ -2,10 +2,12 @@ package config
 
 import (
 	"fmt"
-	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/auth"
-	"gopkg.in/yaml.v3"
 	"net/netip"
 	"os"
+	"time"
+
+	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/auth"
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -39,6 +41,7 @@ type SessionNat struct {
 	Enabled     bool   `yaml:"enabled"`
 	Pool        string `yaml:"pool"`
 	MaxSessions int    `yaml:"max_sessions"`
+	ReuseDelay  string `yaml:"reuse_delay"`
 }
 
 func Load(path string) (Config, error) {
@@ -55,6 +58,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.Server.SessionNat.Enabled && c.Server.SessionNat.MaxSessions == 0 {
 		c.Server.SessionNat.MaxSessions = 120
+	}
+	if c.Server.SessionNat.Enabled && c.Server.SessionNat.ReuseDelay == "" {
+		c.Server.SessionNat.ReuseDelay = "30m"
 	}
 	return c, c.Validate()
 }
@@ -76,11 +82,11 @@ func (c Config) Validate() error {
 		if e != nil || !pool.Addr().Is4() {
 			return fmt.Errorf("invalid session_nat.pool")
 		}
-		server, _ := netip.ParsePrefix(c.Server.TunnelIPv4)
-		poolLast := pool.Masked().Addr()
-		for i := uint64(1); i < uint64(1)<<uint(32-pool.Bits()); i++ {
-			poolLast = poolLast.Next()
+		if pool.Bits() < 16 || pool.Bits() > 30 {
+			return fmt.Errorf("session_nat.pool prefix must be between /16 and /30")
 		}
+		server, _ := netip.ParsePrefix(c.Server.TunnelIPv4)
+		poolLast := netip.AddrFrom4(addIPv4(pool.Masked().Addr().As4(), uint32((uint64(1)<<uint(32-pool.Bits()))-1)))
 		if !server.Contains(pool.Masked().Addr()) || !server.Contains(poolLast) {
 			return fmt.Errorf("session_nat.pool must be inside server network")
 		}
@@ -89,6 +95,12 @@ func (c Config) Validate() error {
 		}
 		if c.Server.SessionNat.MaxSessions <= 0 {
 			return fmt.Errorf("session_nat.max_sessions must be positive")
+		}
+		if c.Server.SessionNat.MaxSessions > 4096 {
+			return fmt.Errorf("session_nat.max_sessions must not exceed 4096")
+		}
+		if _, e := time.ParseDuration(c.Server.SessionNat.ReuseDelay); e != nil || c.Server.SessionNat.ReuseDelay == "" {
+			return fmt.Errorf("invalid session_nat.reuse_delay")
 		}
 		available := uint64(1) << uint(32-pool.Bits())
 		if available > 2 {
@@ -107,6 +119,12 @@ func (c Config) Validate() error {
 }
 func mustResolved(c Config) []ResolvedClient { v, _ := c.ResolvedClients(); return v }
 
+func addIPv4(a [4]byte, n uint32) [4]byte {
+	v := uint32(a[0])<<24 | uint32(a[1])<<16 | uint32(a[2])<<8 | uint32(a[3])
+	v += n
+	return [4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}
+}
+
 func (c Config) ResolvedClients() ([]ResolvedClient, error) {
 	server, e := netip.ParsePrefix(c.Server.TunnelIPv4)
 	if e != nil || !server.Addr().Is4() {
@@ -121,7 +139,7 @@ func (c Config) ResolvedClients() ([]ResolvedClient, error) {
 	}
 	out := make([]ResolvedClient, 0, len(clients))
 	seenIP := map[netip.Addr]bool{}
-	seenKey := map[string]bool{}
+	seenKeyIP := map[string]netip.Addr{}
 	for _, cl := range clients {
 		p, e := netip.ParsePrefix(cl.TunnelIPv4)
 		if e != nil || !p.Addr().Is4() || p.Bits() != 32 {
@@ -145,10 +163,10 @@ func (c Config) ResolvedClients() ([]ResolvedClient, error) {
 			if _, e = auth.ValidatePublicKeyString(key); e != nil {
 				return nil, fmt.Errorf("client %q public key: %w", cl.Name, e)
 			}
-			if seenKey[key] {
-				return nil, fmt.Errorf("public key assigned to multiple clients")
+			if previous, exists := seenKeyIP[key]; exists && previous != p.Addr() {
+				return nil, fmt.Errorf("public key assigned to multiple tunnel IPs")
 			}
-			seenKey[key] = true
+			seenKeyIP[key] = p.Addr()
 		}
 		out = append(out, ResolvedClient{Name: cl.Name, PublicKeys: keys, TunnelIPv4: p})
 	}

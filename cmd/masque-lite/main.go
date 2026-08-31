@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/netip"
+	neturl "net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/auth"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/config"
+	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/hostnet"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/packet"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/session"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/tunnel"
@@ -41,10 +44,21 @@ func run() error {
 		serverKeygen(os.Args[2:])
 		return nil
 	}
+	if len(os.Args) > 1 && os.Args[1] == "check-config" {
+		fs := flag.NewFlagSet("check-config", flag.ContinueOnError)
+		path := fs.String("config", "/etc/masque-lite/config.yaml", "configuration file")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		return checkConfig(*path)
+	}
 	path := flag.String("config", "/etc/masque-lite/config.yaml", "configuration file")
 	flag.Parse()
 	c, err := config.Load(*path)
 	if err != nil {
+		return err
+	}
+	if err := hostnet.CheckIPv4Forwarding(); err != nil {
 		return err
 	}
 	clients, err := c.ResolvedClients()
@@ -99,13 +113,15 @@ func run() error {
 		for _, cl := range clients {
 			excluded = append(excluded, cl.TunnelIPv4.Addr())
 		}
-		mgr = session.NewShadowManager(pool, c.Server.SessionNat.MaxSessions, excluded)
+		reuseDelay, _ := time.ParseDuration(c.Server.SessionNat.ReuseDelay)
+		mgr = session.NewShadowManagerWithClock(pool, c.Server.SessionNat.MaxSessions, excluded, reuseDelay, time.Now, nil)
+		log.Printf("shared-session NAT enabled: server=%s shadow=%s max_sessions=%d", serverPrefix.Masked(), pool.Masked(), c.Server.SessionNat.MaxSessions)
 	} else {
 		mgr = session.NewManager()
 	}
 	fatal := make(chan error, 2)
 	go tunDispatcher(tun, mgr, c.Server.MTU, fatal)
-	qc := &quic.Config{EnableDatagrams: true, HandshakeIdleTimeout: 10 * time.Second, MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 15 * time.Second}
+	qc := &quic.Config{EnableDatagrams: true, HandshakeIdleTimeout: 10 * time.Second, MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 15 * time.Second, MaxIncomingStreams: 32}
 	s := &http3.Server{TLSConfig: tc, QUICConfig: qc, EnableDatagrams: true, Handler: mh.HandlerFunc(func(w mh.ResponseWriter, r *mh.Request) { handleRequest(w, r, c, byKey, mgr, tun) })}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.Serve(ln) }()
@@ -134,6 +150,7 @@ func run() error {
 }
 
 func handleRequest(w mh.ResponseWriter, r *mh.Request, c config.Config, byKey map[string]config.ResolvedClient, mgr *session.Manager, tun *tunnel.Device) {
+	serverPrefix, _ := netip.ParsePrefix(c.Server.TunnelIPv4)
 	parseProtocol, ok := protocolForParse(r.Proto)
 	if !ok {
 		log.Printf("CONNECT-IP rejected: unsupported protocol %q", r.Proto)
@@ -151,9 +168,22 @@ func handleRequest(w mh.ResponseWriter, r *mh.Request, c config.Config, byKey ma
 		mh.Error(w, "client certificate not authorized", mh.StatusUnauthorized)
 		return
 	}
+	release, err := mgr.TryReserve()
+	if err != nil {
+		log.Printf("CONNECT-IP rejected: session admission: %v", err)
+		mh.Error(w, "session capacity unavailable", mh.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+	template, err := requestTemplate(r.Host)
+	if err != nil {
+		log.Printf("CONNECT-IP rejected: invalid authority: %v", err)
+		mh.Error(w, "invalid authority", mh.StatusBadRequest)
+		return
+	}
 	copyReq := *r
 	copyReq.Proto = parseProtocol
-	req, err := connectip.ParseRequest(&copyReq, uritemplate.MustNew("https://"+r.Host+"/connect-ip"))
+	req, err := connectip.ParseRequest(&copyReq, template)
 	if err != nil {
 		log.Printf("CONNECT-IP request parse failed: %v", err)
 		mh.Error(w, err.Error(), mh.StatusBadRequest)
@@ -188,15 +218,23 @@ func handleRequest(w mh.ResponseWriter, r *mh.Request, c config.Config, byKey ma
 			log.Printf("client %s session takeover", client.Name)
 		}
 	}
+	release()
 	go sessionWriter(s, tun, c.Server.MTU)
-	log.Printf("client %s session established", client.Name)
-	go sessionReader(s, tun, c.Server.MTU)
+	log.Printf("session=%d client=%s visible=%s shadow=%s established", s.ID, client.Name, s.VisibleIP, shadowString(s.ShadowIP))
+	go sessionReader(s, tun, mgr, serverPrefix)
 	select {
 	case <-r.Context().Done():
 	case <-s.Ctx.Done():
 	}
 	s.Close()
-	log.Printf("client %s session closed", client.Name)
+	reason := s.CloseReason()
+	if reason == "" {
+		reason = "peer"
+	}
+	if r.Context().Err() != nil {
+		reason = "context"
+	}
+	log.Printf("session=%d client=%s visible=%s shadow=%s closed reason=%s", s.ID, client.Name, s.VisibleIP, shadowString(s.ShadowIP), reason)
 }
 
 func tunDispatcher(tun *tunnel.Device, mgr *session.Manager, mtu int, fatal chan<- error) {
@@ -243,29 +281,42 @@ func sessionWriter(s *session.Session, tun *tunnel.Device, mtu int) {
 					continue
 				}
 				if _, werr := tun.Write(icmp); werr != nil {
-					log.Printf("client %s ICMP write failed: %v", s.Identity, werr)
+					s.SetCloseReason("tun-write-error")
+					log.Printf("session=%d client=%s ICMP write failed: %v", s.ID, s.Identity, werr)
 					s.Close()
 					return
 				}
 			}
 			if err != nil {
-				log.Printf("client %s packet write failed: %v", s.Identity, err)
+				if normalSessionError(err, s.Ctx) {
+					return
+				}
+				s.SetCloseReason("write-error")
+				log.Printf("session=%d client=%s packet write failed: %v", s.ID, s.Identity, err)
 				s.Close()
 				return
 			}
 		}
 	}
 }
-func sessionReader(s *session.Session, tun *tunnel.Device, mtu int) {
+func sessionReader(s *session.Session, tun *tunnel.Device, mgr *session.Manager, serverPrefix netip.Prefix) {
 	for {
 		pkt, err := s.Conn.ReadPacket()
 		if err != nil {
-			log.Printf("client %s session read failed: %v", s.Identity, err)
+			if normalSessionError(err, s.Ctx) {
+				return
+			}
+			s.SetCloseReason("read-error")
+			log.Printf("session=%d client=%s session read failed: %v", s.ID, s.Identity, err)
 			s.Close()
 			return
 		}
 		src, ok := packet.Source(pkt)
 		if !ok || src != s.VisibleIP {
+			continue
+		}
+		dst, ok := packet.Destination(pkt)
+		if !ok || serverPrefix.Contains(dst) || mgr.IsShadowAddress(dst) {
 			continue
 		}
 		select {
@@ -283,7 +334,8 @@ func sessionReader(s *session.Session, tun *tunnel.Device, mtu int) {
 			}
 		}
 		if _, err = tun.Write(pkt); err != nil {
-			log.Printf("client %s TUN write failed: %v", s.Identity, err)
+			s.SetCloseReason("tun-write-error")
+			log.Printf("session=%d client=%s TUN write failed: %v", s.ID, s.Identity, err)
 			s.Close()
 			return
 		}
@@ -296,4 +348,26 @@ func protocolForParse(protocol string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func requestTemplate(host string) (*uritemplate.Template, error) {
+	if host == "" {
+		return nil, fmt.Errorf("empty authority")
+	}
+	u, err := neturl.Parse("https://" + host)
+	if err != nil || u.User != nil || u.Host != host || u.Hostname() == "" {
+		return nil, fmt.Errorf("malformed authority")
+	}
+	return uritemplate.New("https://" + host + "/connect-ip")
+}
+
+func shadowString(ip netip.Addr) string {
+	if !ip.IsValid() {
+		return "-"
+	}
+	return ip.String()
+}
+
+func normalSessionError(err error, ctx context.Context) bool {
+	return ctx.Err() != nil || err == context.Canceled || err == net.ErrClosed || err == io.ErrClosedPipe
 }

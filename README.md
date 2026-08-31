@@ -2,7 +2,7 @@
 
 `masque-lite` is a minimal Mihomo-compatible CONNECT-IP MASQUE server. It is intentionally not a general-purpose MASQUE implementation.
 
-Current scope: Linux target, IPv4-only policy, HTTP/3 + QUIC, CONNECT-IP request validation, mutual-TLS client authentication, fixed address assignment, and a Linux TUN packet data plane. It is experimental and awaiting VPS interoperability validation.
+Current scope: Linux target, IPv4-only policy, HTTP/3 + QUIC, CONNECT-IP request validation, mutual-TLS client authentication, fixed address assignment, and a Linux TUN packet data plane. The recommended shared-profile mode supports many concurrent sessions using the same Mihomo key and visible tunnel IP.
 
 The protocol core is delegated to [MetaCubeX/connect-ip-go](https://github.com/MetaCubeX/connect-ip-go). `usque` documents Cloudflare compatibility differences; `Vincent-bin/masque-server` was used as a reference only and no code was copied.
 
@@ -24,8 +24,13 @@ client:
   tunnel_ipv4: 192.0.2.2/32
 
 server:
-  tunnel_ipv4: 192.0.2.1/30
+  tunnel_ipv4: 192.0.2.1/24
   mtu: 1280
+  session_nat:
+    enabled: true
+    pool: 192.0.2.128/25
+    max_sessions: 120
+    reuse_delay: 30m
 ```
 
 ```yaml
@@ -42,7 +47,7 @@ server:
   mtu: 1280
 ```
 
-`client` and non-empty `clients` cannot be mixed. A repeated key or tunnel IP is rejected. Reusing the same key/IP on another device means the same logical client: the newest session takes over the old one. Different `/32` addresses run concurrently. Expand the host NAT/firewall subnet when expanding the server subnet; masque-lite does not modify host networking.
+`client` and non-empty `clients` cannot be mixed. A repeated tunnel IP is rejected; a key assigned to different tunnel IPs is rejected. In the recommended shared-profile mode, the same key and visible IP can establish concurrent sessions; each receives a private shadow address. With `session_nat.enabled: false`, legacy same-IP newest-session-wins behavior remains available. Expand the host NAT/firewall subnet when expanding the server subnet; masque-lite does not modify host networking.
 
 Generate a separate P-256 ECDSA server certificate for masque-lite. Do not use an RSA wildcard certificate:
 
@@ -75,11 +80,11 @@ Install the binary, certificates, config, and `contrib/masque-lite.service`; cre
 sudo sysctl -w net.ipv4.ip_forward=1
 sudo nft add table ip masque_lite
 sudo nft 'add chain ip masque_lite postrouting { type nat hook postrouting priority srcnat; policy accept; }'
-sudo nft add rule ip masque_lite postrouting oifname "eth0" ip saddr 192.0.2.0/30 masquerade
+sudo nft add rule ip masque_lite postrouting oifname "eth0" ip saddr 192.0.2.0/24 masquerade
 sudo systemctl enable --now masque-lite
 ```
 
-Replace `eth0` and the tunnel subnet as needed. At startup, masque-lite configures `masque0` itself from `server.tunnel_ipv4` and `server.mtu`, including the IPv4 address, netmask, MTU, and UP flag. The service does not modify sysctl or firewall state.
+Replace `eth0` as needed. The forwarding firewall and MASQUERADE rule must cover the complete server network, including the shadow pool (`192.0.2.0/24` in this example). At startup, masque-lite configures `masque0` itself from `server.tunnel_ipv4` and `server.mtu`, including the IPv4 address, netmask, MTU, and UP flag. The service checks that `/proc/sys/net/ipv4/ip_forward` is `1`, but does not modify sysctl or firewall state.
 
 The legacy `client` block remains supported:
 
@@ -92,7 +97,7 @@ server:
   mtu: 1280
 ```
 
-For concurrent devices, use the `clients` block with one independent P-256 client key and one `/32` per device:
+For separate visible identities, use the `clients` block with one independent P-256 client key and one `/32` per device:
 
 ```yaml
 clients:
@@ -107,9 +112,9 @@ server:
   mtu: 1280
 ```
 
-Do not configure both blocks. A same-IP reconnect takes over the previous session; different tunnel IPs remain concurrent. Expand the host NAT/firewall rule when expanding the subnet. The service uses one TUN reader and bounded per-session queues, and does not implement a userspace TCP/IP stack.
+Do not configure both blocks. The service uses one TUN reader and bounded per-session queues, and does not implement a userspace TCP/IP stack.
 
-To allow multiple simultaneous sessions that intentionally share the same visible client IP, enable the bounded shadow pool:
+The shared-profile mode is the recommended production data plane for multiple users/devices sharing one Mihomo profile:
 
 ```yaml
 server:
@@ -119,13 +124,20 @@ server:
     enabled: true
     pool: 192.0.2.128/25
     max_sessions: 120
+    reuse_delay: 30m
 ```
 
-Each session then receives a unique internal shadow address from the pool. Packets are rewritten at the TUN boundary so Linux conntrack can distinguish concurrent flows; the visible Mihomo configuration remains unchanged. The pool must be inside the server network and must leave room for network/broadcast addresses. With `session_nat` disabled or absent, legacy same-IP newest-session-wins behavior remains active.
+Each session receives a unique internal shadow address from the pool. Packets are rewritten at the TUN boundary so Linux conntrack can distinguish concurrent flows; the visible Mihomo configuration remains unchanged. Shadow addresses are cooled down for `reuse_delay` after close so stale conntrack packets are not delivered to a new session. The pool must be inside the server network, must not contain the server address, and must leave room for network/broadcast addresses. `max_sessions` defaults to 120 and is capped at 4096.
+
+Before replacing a running binary, use the configuration-only preflight (it does not create a TUN, listen, or change host state):
+
+```sh
+masque-lite check-config -config /etc/masque-lite/config.yaml
+```
 
 ## Validation and memory
 
-Go unit tests and a Linux amd64 build are automated. VPS testing must still verify Mihomo setup, TCP/UDP/DNS/QUIC traffic, reconnect, restart recovery, MTU behavior, and packet-loop absence:
+Go tests, race tests, vet, and a Linux amd64 build are automated. VPS testing must still verify Mihomo setup, TCP/UDP/DNS/QUIC traffic, reconnect, restart recovery, MTU behavior, and packet-loop absence:
 
 ```sh
 systemctl show masque-lite.service -p MemoryCurrent -p MemoryPeak

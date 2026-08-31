@@ -18,6 +18,18 @@ func TestProtocolForParse(t *testing.T) {
 	}
 }
 
+func TestRequestTemplateRejectsMalformedAuthority(t *testing.T) {
+	for _, host := range []string{"", "user@example.com", "example.com/path", "example.com:bad"} {
+		if got, err := requestTemplate(host); err == nil || got != nil {
+			t.Fatalf("host %q was accepted", host)
+		}
+	}
+	template, err := requestTemplate("example.com:443")
+	if err != nil || template == nil {
+		t.Fatalf("valid authority rejected: %v", err)
+	}
+}
+
 func TestIPv4PacketValidation(t *testing.T) {
 	pkt := make([]byte, 20)
 	pkt[0] = 0x45

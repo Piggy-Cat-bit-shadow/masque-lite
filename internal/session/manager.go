@@ -2,9 +2,13 @@ package session
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"net/netip"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type PacketConn interface {
@@ -13,18 +17,31 @@ type PacketConn interface {
 	Close() error
 }
 type Session struct {
-	ID         uint64
-	ClientIP   netip.Addr
-	VisibleIP  netip.Addr
-	ShadowIP   netip.Addr
-	Identity   string
-	Conn       PacketConn
-	Ctx        context.Context
-	Cancel     context.CancelFunc
-	Generation uint64
-	Outbound   chan []byte
-	closeOnce  sync.Once
-	onClose    func(*Session)
+	ID          uint64
+	ClientIP    netip.Addr
+	VisibleIP   netip.Addr
+	ShadowIP    netip.Addr
+	Identity    string
+	Conn        PacketConn
+	Ctx         context.Context
+	Cancel      context.CancelFunc
+	Generation  uint64
+	Outbound    chan []byte
+	closeOnce   sync.Once
+	onClose     func(*Session)
+	closeReason atomic.Value
+}
+
+func (s *Session) SetCloseReason(reason string) {
+	if reason != "" {
+		s.closeReason.Store(reason)
+	}
+}
+func (s *Session) CloseReason() string {
+	if reason, ok := s.closeReason.Load().(string); ok {
+		return reason
+	}
+	return ""
 }
 
 func New(ip netip.Addr, identity string, conn PacketConn, onClose func(*Session)) *Session {
@@ -55,23 +72,72 @@ type Manager struct {
 	shadowNext       netip.Addr
 	max              int
 	excluded         map[netip.Addr]bool
+	cooling          map[netip.Addr]time.Time
+	reserved         int
+	now              func() time.Time
+	random           func(uint32) uint32
+	reuseDelay       time.Duration
 }
 
 func NewManager() *Manager { return &Manager{sessions: map[netip.Addr]*Session{}} }
 func NewShadowManager(pool netip.Prefix, max int, excluded []netip.Addr) *Manager {
+	return NewShadowManagerWithClock(pool, max, excluded, 0, time.Now, cryptoRandom)
+}
+func NewShadowManagerWithClock(pool netip.Prefix, max int, excluded []netip.Addr, reuseDelay time.Duration, now func() time.Time, random func(uint32) uint32) *Manager {
 	pool = pool.Masked()
 	m := NewManager()
 	m.shadow = true
 	m.shadowPool = pool
-	m.shadowNext = pool.Addr()
+	m.shadowNext = netip.Addr{}
 	m.max = max
 	m.sessionsByShadow = map[netip.Addr]*Session{}
 	m.sessionsByID = map[uint64]*Session{}
 	m.excluded = map[netip.Addr]bool{}
+	m.cooling = map[netip.Addr]time.Time{}
+	m.reuseDelay = reuseDelay
+	m.now = now
+	m.random = random
+	if m.now == nil {
+		m.now = time.Now
+	}
+	if m.random == nil {
+		m.random = cryptoRandom
+	}
 	for _, ip := range excluded {
 		m.excluded[ip] = true
 	}
 	return m
+}
+func cryptoRandom(n uint32) uint32 {
+	var b [4]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b[:]) % n
+}
+func (m *Manager) TryReserve() (func(), error) {
+	m.mu.Lock()
+	if !m.shadow {
+		m.mu.Unlock()
+		return func() {}, nil
+	}
+	if len(m.sessionsByID)+m.reserved >= m.max {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("session capacity exhausted")
+	}
+	m.reserved++
+	released := false
+	m.mu.Unlock()
+	return func() {
+		m.mu.Lock()
+		if !released {
+			released = true
+			if m.reserved > 0 {
+				m.reserved--
+			}
+		}
+		m.mu.Unlock()
+	}, nil
 }
 func (m *Manager) Register(s *Session) error {
 	m.mu.Lock()
@@ -95,23 +161,32 @@ func (m *Manager) Register(s *Session) error {
 	return nil
 }
 func (m *Manager) allocateLocked() (netip.Addr, bool) {
-	count := uint64(1) << uint(32-m.shadowPool.Bits())
-	last := m.shadowPool.Addr()
-	for i := uint64(1); i < count; i++ {
-		last = last.Next()
+	network := ipv4Value(m.shadowPool.Masked().Addr())
+	count := uint32(1) << uint(32-m.shadowPool.Bits())
+	usable := count - 2
+	if usable == 0 {
+		return netip.Addr{}, false
 	}
-	for i := uint64(0); i < count; i++ {
-		ip := m.shadowNext
-		if !m.shadowPool.Contains(ip) {
-			ip = m.shadowPool.Addr()
-		}
-		m.shadowNext = ip.Next()
-		if m.shadowPool.Contains(m.shadowNext) == false {
-			m.shadowNext = m.shadowPool.Addr()
-		}
-		if ip == m.shadowPool.Addr() || ip == last || m.excluded[ip] || m.sessionsByShadow[ip] != nil {
+	if m.shadowNext.IsValid() {
+		// Cursor is already set by the previous allocation.
+	} else {
+		m.shadowNext = netip.AddrFrom4(ipv4Bytes(network + 1 + m.random(usable)))
+	}
+	start := ipv4Value(m.shadowNext)
+	for i := uint32(0); i < usable; i++ {
+		value := network + 1 + ((start - (network + 1) + i) % usable)
+		ip := netip.AddrFrom4(ipv4Bytes(value))
+		if m.excluded[ip] || m.sessionsByShadow[ip] != nil {
 			continue
 		}
+		if until, ok := m.cooling[ip]; ok {
+			if !m.now().Before(until) {
+				delete(m.cooling, ip)
+			} else {
+				continue
+			}
+		}
+		m.shadowNext = netip.AddrFrom4(ipv4Bytes(network + 1 + ((value - (network + 1) + 1) % usable)))
 		return ip, true
 	}
 	return netip.Addr{}, false
@@ -137,6 +212,9 @@ func (m *Manager) RemoveIfCurrent(s *Session) bool {
 		}
 		delete(m.sessionsByID, s.ID)
 		delete(m.sessionsByShadow, s.ShadowIP)
+		if m.reuseDelay > 0 {
+			m.cooling[s.ShadowIP] = m.now().Add(m.reuseDelay)
+		}
 		return true
 	}
 	if m.sessions[s.ClientIP] != s {
@@ -181,3 +259,16 @@ func (m *Manager) Snapshot() []*Session {
 	return out
 }
 func (m *Manager) IsShadow() bool { m.mu.RLock(); defer m.mu.RUnlock(); return m.shadow }
+func (m *Manager) IsShadowAddress(ip netip.Addr) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.shadow && m.shadowPool.Contains(ip)
+}
+
+func ipv4Value(ip netip.Addr) uint32 {
+	a := ip.As4()
+	return uint32(a[0])<<24 | uint32(a[1])<<16 | uint32(a[2])<<8 | uint32(a[3])
+}
+func ipv4Bytes(v uint32) [4]byte {
+	return [4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}
+}

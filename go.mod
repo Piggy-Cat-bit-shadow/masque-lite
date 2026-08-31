@@ -3,10 +3,10 @@ module github.com/Piggy-Cat-bit-shadow/masque-lite
 go 1.20
 
 require (
-	github.com/metacubex/connect-ip-go v0.0.0-20260412152424-e1625567920a
+	github.com/metacubex/connect-ip-go v0.0.0-20260727083417-67ccdb0cf771
 	github.com/metacubex/http v0.1.7
-	github.com/metacubex/quic-go v0.59.1-0.20260112033758-aa29579f2001
-	github.com/metacubex/tls v0.1.7
+	github.com/metacubex/quic-go v0.61.1-0.20260727080200-2548683b76f4
+	github.com/metacubex/tls v0.1.8
 	github.com/yosida95/uritemplate/v3 v3.0.2
 	golang.org/x/sys v0.30.0
 	gopkg.in/yaml.v3 v3.0.1

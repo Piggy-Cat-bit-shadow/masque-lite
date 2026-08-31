@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/netip"
 	"testing"
+	"time"
 )
 
 type fakeConn struct{ closed int }
@@ -77,4 +78,70 @@ func TestShadowManagerAllowsSameVisibleIP(t *testing.T) {
 	}
 	c.Close()
 	b.Close()
+}
+
+func TestShadowManagerReuseCooldown(t *testing.T) {
+	now := time.Unix(100, 0)
+	m := NewShadowManagerWithClock(netip.MustParsePrefix("192.0.2.128/30"), 2, nil, time.Minute, func() time.Time { return now }, func(uint32) uint32 { return 0 })
+	a := New(netip.MustParseAddr("192.0.2.2"), "a", &fakeConn{}, func(x *Session) { m.RemoveIfCurrent(x) })
+	b := New(netip.MustParseAddr("192.0.2.2"), "b", &fakeConn{}, func(x *Session) { m.RemoveIfCurrent(x) })
+	if err := m.Register(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Register(b); err != nil {
+		t.Fatal(err)
+	}
+	shadow := a.ShadowIP
+	a.Close()
+	c := New(netip.MustParseAddr("192.0.2.2"), "c", &fakeConn{}, func(x *Session) { m.RemoveIfCurrent(x) })
+	if err := m.Register(c); err == nil {
+		t.Fatal("expected cooling address to be unavailable")
+	}
+	now = now.Add(time.Minute)
+	if err := m.Register(c); err != nil {
+		t.Fatal(err)
+	}
+	if c.ShadowIP != shadow {
+		t.Fatalf("shadow = %s, want %s", c.ShadowIP, shadow)
+	}
+	b.Close()
+	c.Close()
+}
+
+func TestShadowManagerAdmission(t *testing.T) {
+	m := NewShadowManager(netip.MustParsePrefix("192.0.2.128/30"), 1, nil)
+	release, err := m.TryReserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.TryReserve(); err == nil {
+		t.Fatal("expected reserved capacity to reject a second session")
+	}
+	release()
+}
+
+func TestShadowManagerAllocatesManySameVisibleSessions(t *testing.T) {
+	m := NewShadowManager(netip.MustParsePrefix("192.0.2.0/24"), 100, nil)
+	sessions := make([]*Session, 0, 100)
+	seen := map[netip.Addr]bool{}
+	for i := 0; i < 100; i++ {
+		s := New(netip.MustParseAddr("192.0.2.2"), "shared", &fakeConn{}, func(x *Session) { m.RemoveIfCurrent(x) })
+		if err := m.Register(s); err != nil {
+			t.Fatal(err)
+		}
+		if seen[s.ShadowIP] {
+			t.Fatalf("duplicate shadow address %s", s.ShadowIP)
+		}
+		seen[s.ShadowIP] = true
+		sessions = append(sessions, s)
+	}
+	if m.Len() != 100 {
+		t.Fatalf("sessions = %d", m.Len())
+	}
+	for _, s := range sessions {
+		s.Close()
+	}
+	if m.Len() != 0 {
+		t.Fatalf("sessions after close = %d", m.Len())
+	}
 }

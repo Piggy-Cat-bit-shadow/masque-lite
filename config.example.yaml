@@ -16,10 +16,14 @@ client:
 #     public_keys: [KEY_DEVICE_B]
 #     tunnel_ipv4: 192.0.2.3/32
 server:
-  tunnel_ipv4: 192.0.2.1/30
+  tunnel_ipv4: 192.0.2.1/24
   mtu: 1280
-  # Optional: allow same visible IP to use concurrent sessions.
-  # session_nat:
-  #   enabled: true
-  #   pool: 192.0.2.128/25
-  #   max_sessions: 120
+  session_nat:
+    enabled: true
+    pool: 192.0.2.128/25
+    max_sessions: 120
+    reuse_delay: 30m
+# For legacy single-session compatibility only, disable session_nat and use:
+# server:
+#   tunnel_ipv4: 192.0.2.1/30
+#   mtu: 1280

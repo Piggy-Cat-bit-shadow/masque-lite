@@ -5,25 +5,25 @@ import (
 	"net/netip"
 )
 
-func valid(b []byte) (int, bool) {
+func valid(b []byte) (int, int, bool) {
 	if len(b) < 20 || b[0]>>4 != 4 {
-		return 0, false
+		return 0, 0, false
 	}
 	ihl := int(b[0]&15) * 4
 	if ihl < 20 || ihl > len(b) {
-		return 0, false
+		return 0, 0, false
 	}
 	total := int(binary.BigEndian.Uint16(b[2:4]))
 	if total < ihl || total > len(b) {
-		return 0, false
+		return 0, 0, false
 	}
-	return ihl, true
+	return ihl, total, true
 }
 func RewriteSourceIPv4(b []byte, old, new netip.Addr) bool      { return rewrite(b, old, new, true) }
 func RewriteDestinationIPv4(b []byte, old, new netip.Addr) bool { return rewrite(b, old, new, false) }
 func TranslateICMP(b []byte, visible, shadow netip.Addr, toKernel bool) bool {
-	ihl, ok := valid(b)
-	if !ok || b[9] != 1 || len(b) < ihl+8 {
+	ihl, total, ok := valid(b)
+	if !ok || b[9] != 1 || total < ihl+8 {
 		return false
 	}
 	old, new := visible, shadow
@@ -37,41 +37,37 @@ func TranslateICMP(b []byte, visible, shadow netip.Addr, toKernel bool) bool {
 	} else if !rewrite(b, old, new, false) {
 		return false
 	}
-	quote := b[ihl+8:]
+	quote := b[ihl+8 : total]
 	if len(quote) >= 20 && quote[0]>>4 == 4 {
 		qihl := int(quote[0]&15) * 4
 		if qihl >= 20 && qihl <= len(quote) {
-			rewriteHeader(quote, visible, shadow, true)
-			rewriteHeader(quote, visible, shadow, false)
+			rewriteHeaderWithTransport(quote, visible, shadow, true)
+			rewriteHeaderWithTransport(quote, visible, shadow, false)
 			if !toKernel {
-				rewriteHeader(quote, shadow, visible, true)
-				rewriteHeader(quote, shadow, visible, false)
+				rewriteHeaderWithTransport(quote, shadow, visible, true)
+				rewriteHeaderWithTransport(quote, shadow, visible, false)
 			}
 		}
 	}
 	checksumIPv4(b[:ihl])
-	total := int(binary.BigEndian.Uint16(b[2:4]))
-	if total > len(b) {
-		total = len(b)
-	}
 	binary.BigEndian.PutUint16(b[ihl+2:ihl+4], 0)
 	binary.BigEndian.PutUint16(b[ihl+2:ihl+4], checksum(b[ihl:total]))
 	return true
 }
 func Source(b []byte) (netip.Addr, bool) {
-	if _, ok := valid(b); !ok {
+	if _, _, ok := valid(b); !ok {
 		return netip.Addr{}, false
 	}
 	return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}), true
 }
 func Destination(b []byte) (netip.Addr, bool) {
-	if _, ok := valid(b); !ok {
+	if _, _, ok := valid(b); !ok {
 		return netip.Addr{}, false
 	}
 	return netip.AddrFrom4([4]byte{b[16], b[17], b[18], b[19]}), true
 }
 func rewrite(b []byte, old, new netip.Addr, src bool) bool {
-	ihl, ok := valid(b)
+	ihl, total, ok := valid(b)
 	if !ok || !old.Is4() || !new.Is4() {
 		return false
 	}
@@ -93,10 +89,10 @@ func rewrite(b []byte, old, new netip.Addr, src bool) bool {
 	copy(b[ni:ni+4], n[:])
 	proto := b[9]
 	frag := binary.BigEndian.Uint16(b[6:8])
-	if frag&0x1fff == 0 && proto == 6 && ihl+18 <= len(b) {
+	if frag&0x1fff == 0 && proto == 6 && total >= ihl+18 {
 		updateTransport(b, ihl, old1, old2, new1, new2)
 	}
-	if frag&0x1fff == 0 && proto == 17 && ihl+8 <= len(b) && binary.BigEndian.Uint16(b[ihl+6:ihl+8]) != 0 {
+	if frag&0x1fff == 0 && proto == 17 && total >= ihl+8 && binary.BigEndian.Uint16(b[ihl+6:ihl+8]) != 0 {
 		updateTransport(b, ihl, old1, old2, new1, new2)
 	}
 	return true
@@ -116,6 +112,29 @@ func rewriteHeader(b []byte, old, new netip.Addr, src bool) bool {
 	}
 	copy(b[off:off+4], n[:])
 	checksumIPv4(b[:int(b[0]&15)*4])
+	return true
+}
+
+func rewriteHeaderWithTransport(b []byte, old, new netip.Addr, src bool) bool {
+	if !rewriteHeader(b, old, new, src) {
+		return false
+	}
+	if len(b) < 20 {
+		return true
+	}
+	ihl := int(b[0]&15) * 4
+	if ihl > len(b) || b[9] == 1 || binary.BigEndian.Uint16(b[6:8])&0x1fff != 0 {
+		return true
+	}
+	o, n := old.As4(), new.As4()
+	old1, old2 := binary.BigEndian.Uint16(o[:2]), binary.BigEndian.Uint16(o[2:])
+	new1, new2 := binary.BigEndian.Uint16(n[:2]), binary.BigEndian.Uint16(n[2:])
+	if b[9] == 6 && ihl+18 <= len(b) {
+		updateTransport(b, ihl, old1, old2, new1, new2)
+	}
+	if b[9] == 17 && ihl+8 <= len(b) && binary.BigEndian.Uint16(b[ihl+6:ihl+8]) != 0 {
+		updateTransport(b, ihl, old1, old2, new1, new2)
+	}
 	return true
 }
 func checksumIPv4(h []byte) {
@@ -152,7 +171,11 @@ func updateTransport(b []byte, ihl int, old1, old2, new1, new2 uint16) {
 	if b[9] == 17 {
 		field = ihl + 6
 	}
-	if field+2 > len(b) {
+	limit := len(b)
+	if declared := int(binary.BigEndian.Uint16(b[2:4])); declared < limit {
+		limit = declared
+	}
+	if field+2 > limit {
 		return
 	}
 	update16(b[field:field+2], binary.BigEndian.Uint16(b[field:field+2]), old1, new1)
