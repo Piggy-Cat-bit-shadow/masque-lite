@@ -1,0 +1,19 @@
+[Unit]
+Description=Minimal Mihomo CONNECT-IP MASQUE server
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=masque-lite
+Group=masque-lite
+ExecStart=/usr/local/bin/masque-lite -config /etc/masque-lite/config.yaml
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+listen: 127.0.0.1:4433
+tls:
+  cert: /etc/masque-lite/server.crt
+  key: /etc/masque-lite/server.key
+client:
+  public_keys: []
+  tunnel_ipv4: 192.0.2.2/32
+server:
+  tunnel_ipv4: 192.0.2.1/30
+  mtu: 1280
