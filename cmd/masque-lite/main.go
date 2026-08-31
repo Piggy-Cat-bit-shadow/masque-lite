@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -165,7 +166,11 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
-	_ = s.Shutdown(context.Background())
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if e := s.Shutdown(shutdownCtx); e != nil {
+		_ = s.Close()
+	}
 }
 
 func protocolForParse(protocol string) (string, bool) {

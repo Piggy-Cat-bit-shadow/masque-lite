@@ -16,20 +16,52 @@ type Device struct {
 	MTU  int
 }
 
+type tunFDOps struct {
+	open        func(string, int, uint32) (int, error)
+	ioctl       func(int, uint, *unix.Ifreq) error
+	setNonblock func(int, bool) error
+	newFile     func(uintptr, string) *os.File
+	close       func(int) error
+}
+
+var systemTunFDOps = tunFDOps{
+	open:        unix.Open,
+	ioctl:       unix.IoctlIfreq,
+	setNonblock: unix.SetNonblock,
+	newFile:     os.NewFile,
+	close:       unix.Close,
+}
+
 func Open(name string, mtu int) (*Device, error) {
-	f, e := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
-	if e != nil {
-		return nil, e
+	return openTun(name, mtu, systemTunFDOps)
+}
+
+func openTun(name string, mtu int, ops tunFDOps) (*Device, error) {
+	fd, err := ops.open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
 	}
-	ifr, e := newIfreq(name)
-	if e != nil {
-		f.Close()
-		return nil, e
+	closeFD := true
+	defer func() {
+		if closeFD {
+			_ = ops.close(fd)
+		}
+	}()
+	ifr, err := newIfreq(name)
+	if err != nil {
+		return nil, err
 	}
-	if e = unix.IoctlIfreq(int(f.Fd()), unix.TUNSETIFF, ifr); e != nil {
-		f.Close()
-		return nil, fmt.Errorf("TUNSETIFF: %w", e)
+	if err = ops.ioctl(fd, unix.TUNSETIFF, ifr); err != nil {
+		return nil, fmt.Errorf("TUNSETIFF: %w", err)
 	}
+	if err = ops.setNonblock(fd, true); err != nil {
+		return nil, fmt.Errorf("set TUN nonblocking: %w", err)
+	}
+	f := ops.newFile(uintptr(fd), "/dev/net/tun")
+	if f == nil {
+		return nil, fmt.Errorf("create TUN file")
+	}
+	closeFD = false
 	return &Device{f: f, Name: ifr.Name(), MTU: mtu}, nil
 }
 
