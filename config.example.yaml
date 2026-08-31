@@ -7,6 +7,14 @@ tls:
 client:
   public_keys: []
   tunnel_ipv4: 192.0.2.2/32
+# For multiple devices, replace the legacy client block with:
+# clients:
+#   - name: iphone
+#     public_keys: [KEY_DEVICE_A]
+#     tunnel_ipv4: 192.0.2.2/32
+#   - name: mac
+#     public_keys: [KEY_DEVICE_B]
+#     tunnel_ipv4: 192.0.2.3/32
 server:
   tunnel_ipv4: 192.0.2.1/30
   mtu: 1280

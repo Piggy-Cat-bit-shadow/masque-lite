@@ -15,6 +15,35 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o mas
 
 `keygen` emits a P-256 client key pair. Its `private-key` is base64-encoded SEC1 ASN.1 DER and goes directly in Mihomo's `private-key`. Its `public-key` is an uncompressed P-256 key and goes in the server `config.yaml` `client.public_keys` whitelist.
 
+The legacy single-client configuration remains supported. For concurrent devices, use one independent client key and one `/32` per device:
+
+```yaml
+client:
+  public_keys:
+    - KEY_A
+  tunnel_ipv4: 192.0.2.2/32
+
+server:
+  tunnel_ipv4: 192.0.2.1/30
+  mtu: 1280
+```
+
+```yaml
+clients:
+  - name: iphone
+    public_keys: [KEY_A]
+    tunnel_ipv4: 192.0.2.2/32
+  - name: mac
+    public_keys: [KEY_B]
+    tunnel_ipv4: 192.0.2.3/32
+
+server:
+  tunnel_ipv4: 192.0.2.1/24
+  mtu: 1280
+```
+
+`client` and non-empty `clients` cannot be mixed. A repeated key or tunnel IP is rejected. Reusing the same key/IP on another device means the same logical client: the newest session takes over the old one. Different `/32` addresses run concurrently. Expand the host NAT/firewall subnet when expanding the server subnet; masque-lite does not modify host networking.
+
 Generate a separate P-256 ECDSA server certificate for masque-lite. Do not use an RSA wildcard certificate:
 
 ```sh
@@ -51,6 +80,34 @@ sudo systemctl enable --now masque-lite
 ```
 
 Replace `eth0` and the tunnel subnet as needed. At startup, masque-lite configures `masque0` itself from `server.tunnel_ipv4` and `server.mtu`, including the IPv4 address, netmask, MTU, and UP flag. The service does not modify sysctl or firewall state.
+
+The legacy `client` block remains supported:
+
+```yaml
+client:
+  public_keys: [KEY_A]
+  tunnel_ipv4: 192.0.2.2/32
+server:
+  tunnel_ipv4: 192.0.2.1/30
+  mtu: 1280
+```
+
+For concurrent devices, use the `clients` block with one independent P-256 client key and one `/32` per device:
+
+```yaml
+clients:
+  - name: iphone
+    public_keys: [KEY_A]
+    tunnel_ipv4: 192.0.2.2/32
+  - name: mac
+    public_keys: [KEY_B]
+    tunnel_ipv4: 192.0.2.3/32
+server:
+  tunnel_ipv4: 192.0.2.1/24
+  mtu: 1280
+```
+
+Do not configure both blocks. A same-IP reconnect takes over the previous session; different tunnel IPs remain concurrent. Expand the host NAT/firewall rule when expanding the subnet. The service uses one TUN reader and bounded per-session queues, and does not implement a userspace TCP/IP stack.
 
 ## Validation and memory
 
