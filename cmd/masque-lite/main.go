@@ -70,11 +70,14 @@ func main() {
 		active = true
 		sessionMu.Unlock()
 		defer func() { sessionMu.Lock(); active = false; sessionMu.Unlock() }()
-		if r.Proto != "connect-ip" {
+		parseProtocol, ok := protocolForParse(r.Proto)
+		if !ok {
 			mh.Error(w, "only CONNECT-IP is supported", mh.StatusNotImplemented)
 			return
 		}
-		req, e := connectip.ParseRequest(r, uritemplate.MustNew("https://"+r.Host+"/connect-ip"))
+		requestForParse := *r
+		requestForParse.Proto = parseProtocol
+		req, e := connectip.ParseRequest(&requestForParse, uritemplate.MustNew("https://"+r.Host+"/connect-ip"))
 		if e != nil {
 			mh.Error(w, e.Error(), mh.StatusBadRequest)
 			return
@@ -133,4 +136,13 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	_ = s.Shutdown(context.Background())
+}
+
+func protocolForParse(protocol string) (string, bool) {
+	switch protocol {
+	case "connect-ip", "cf-connect-ip":
+		return "connect-ip", true
+	default:
+		return "", false
+	}
 }
