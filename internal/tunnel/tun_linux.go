@@ -6,13 +6,6 @@ import (
 	"fmt"
 	"golang.org/x/sys/unix"
 	"os"
-	"unsafe"
-)
-
-const (
-	tunSetIFF = 0x400454ca
-	iffTun    = 0x0001
-	iffNoPI   = 0x1000
 )
 
 type Device struct {
@@ -26,15 +19,25 @@ func Open(name string, mtu int) (*Device, error) {
 	if e != nil {
 		return nil, e
 	}
-	var ifr [unix.IFNAMSIZ]byte
-	copy(ifr[:], name)
-	*(*uint16)(unsafe.Pointer(&ifr[unix.IFNAMSIZ-2])) = iffTun | iffNoPI
-	_, _, e = unix.Syscall(unix.SYS_IOCTL, f.Fd(), tunSetIFF, uintptr(unsafe.Pointer(&ifr[0])))
-	if e != unix.Errno(0) {
+	ifr, e := newIfreq(name)
+	if e != nil {
+		f.Close()
+		return nil, e
+	}
+	if e = unix.IoctlIfreq(int(f.Fd()), unix.TUNSETIFF, ifr); e != nil {
 		f.Close()
 		return nil, fmt.Errorf("TUNSETIFF: %w", e)
 	}
-	return &Device{f: f, Name: string(ifr[:len(name)]), MTU: mtu}, nil
+	return &Device{f: f, Name: ifr.Name(), MTU: mtu}, nil
+}
+
+func newIfreq(name string) (*unix.Ifreq, error) {
+	ifr, err := unix.NewIfreq(name)
+	if err != nil {
+		return nil, err
+	}
+	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
+	return ifr, nil
 }
 func (d *Device) Read(p []byte) (int, error)  { return d.f.Read(p) }
 func (d *Device) Write(p []byte) (int, error) { return d.f.Write(p) }

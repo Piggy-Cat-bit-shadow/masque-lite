@@ -1,5 +1,7 @@
 listen: 127.0.0.1:4433
 tls:
+  # Generated with: masque-lite server-keygen -cert /etc/masque-lite/server.crt -key /etc/masque-lite/server.key
+  # Must be an independent P-256 ECDSA certificate, not an RSA wildcard certificate.
   cert: /etc/masque-lite/server.crt
   key: /etc/masque-lite/server.key
 client:

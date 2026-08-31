@@ -26,6 +26,10 @@ func main() {
 		keygen()
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "server-keygen" {
+		serverKeygen(os.Args[2:])
+		return
+	}
 	path := flag.String("config", "/etc/masque-lite/config.yaml", "configuration file")
 	flag.Parse()
 	c, e := config.Load(*path)
