@@ -13,6 +13,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+StateDirectory=masque-lite
+StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=2
 [Install]

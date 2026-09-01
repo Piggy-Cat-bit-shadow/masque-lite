@@ -13,9 +13,13 @@ import (
 type Config struct {
 	Listen  string   `yaml:"listen"`
 	TLS     TLS      `yaml:"tls"`
+	QUIC    QUIC     `yaml:"quic"`
 	Client  Client   `yaml:"client"`
 	Clients []Client `yaml:"clients,omitempty"`
 	Server  Server   `yaml:"server"`
+}
+type QUIC struct {
+	StatelessResetKeyFile string `yaml:"stateless_reset_key_file"`
 }
 type TLS struct {
 	Cert string `yaml:"cert"`
@@ -33,9 +37,10 @@ type ResolvedClient struct {
 	TunnelIPv4 netip.Prefix
 }
 type Server struct {
-	TunnelIPv4 string     `yaml:"tunnel_ipv4"`
-	MTU        int        `yaml:"mtu"`
-	SessionNat SessionNat `yaml:"session_nat,omitempty"`
+	TunnelIPv4         string     `yaml:"tunnel_ipv4"`
+	MTU                int        `yaml:"mtu"`
+	SessionIdleTimeout string     `yaml:"session_idle_timeout"`
+	SessionNat         SessionNat `yaml:"session_nat,omitempty"`
 }
 type SessionNat struct {
 	Enabled     bool   `yaml:"enabled"`
@@ -56,6 +61,12 @@ func Load(path string) (Config, error) {
 	if c.Server.MTU == 0 {
 		c.Server.MTU = 1280
 	}
+	if c.QUIC.StatelessResetKeyFile == "" {
+		c.QUIC.StatelessResetKeyFile = "/var/lib/masque-lite/stateless-reset.key"
+	}
+	if c.Server.SessionIdleTimeout == "" {
+		c.Server.SessionIdleTimeout = "30m"
+	}
 	if c.Server.SessionNat.Enabled && c.Server.SessionNat.MaxSessions == 0 {
 		c.Server.SessionNat.MaxSessions = 120
 	}
@@ -73,6 +84,16 @@ func (c Config) Validate() error {
 	}
 	if c.Server.MTU != 0 && (c.Server.MTU < 576 || c.Server.MTU > 65535) {
 		return fmt.Errorf("server.mtu must be between 576 and 65535")
+	}
+	idleTimeout := c.Server.SessionIdleTimeout
+	if idleTimeout == "" {
+		idleTimeout = "30m"
+	}
+	if _, e := time.ParseDuration(idleTimeout); e != nil {
+		return fmt.Errorf("invalid server.session_idle_timeout")
+	}
+	if d, _ := time.ParseDuration(idleTimeout); d < 0 {
+		return fmt.Errorf("server.session_idle_timeout must not be negative")
 	}
 	if _, e := c.ResolvedClients(); e != nil {
 		return e

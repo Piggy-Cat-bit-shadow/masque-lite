@@ -17,19 +17,20 @@ type PacketConn interface {
 	Close() error
 }
 type Session struct {
-	ID          uint64
-	ClientIP    netip.Addr
-	VisibleIP   netip.Addr
-	ShadowIP    netip.Addr
-	Identity    string
-	Conn        PacketConn
-	Ctx         context.Context
-	Cancel      context.CancelFunc
-	Generation  uint64
-	Outbound    chan []byte
-	closeOnce   sync.Once
-	onClose     func(*Session)
-	closeReason atomic.Value
+	ID           uint64
+	ClientIP     netip.Addr
+	VisibleIP    netip.Addr
+	ShadowIP     netip.Addr
+	Identity     string
+	Conn         PacketConn
+	Ctx          context.Context
+	Cancel       context.CancelFunc
+	Generation   uint64
+	Outbound     chan []byte
+	closeOnce    sync.Once
+	onClose      func(*Session)
+	closeReason  atomic.Value
+	lastActivity atomic.Int64
 }
 
 func (s *Session) SetCloseReason(reason string) {
@@ -49,8 +50,13 @@ func New(ip netip.Addr, identity string, conn PacketConn, onClose func(*Session)
 }
 func NewWithContext(parent context.Context, ip netip.Addr, identity string, conn PacketConn, onClose func(*Session)) *Session {
 	ctx, cancel := context.WithCancel(parent)
-	return &Session{ClientIP: ip, VisibleIP: ip, Identity: identity, Conn: conn, Ctx: ctx, Cancel: cancel, Outbound: make(chan []byte, 128), onClose: onClose}
+	s := &Session{ClientIP: ip, VisibleIP: ip, Identity: identity, Conn: conn, Ctx: ctx, Cancel: cancel, Outbound: make(chan []byte, 128), onClose: onClose}
+	s.Touch(time.Now())
+	return s
 }
+
+func (s *Session) Touch(now time.Time)     { s.lastActivity.Store(now.UnixNano()) }
+func (s *Session) LastActivity() time.Time { return time.Unix(0, s.lastActivity.Load()) }
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
 		s.Cancel()

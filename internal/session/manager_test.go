@@ -145,3 +145,12 @@ func TestShadowManagerAllocatesManySameVisibleSessions(t *testing.T) {
 		t.Fatalf("sessions after close = %d", m.Len())
 	}
 }
+
+func TestSessionActivity(t *testing.T) {
+	s := New(netip.MustParseAddr("192.0.2.2"), "test", &fakeConn{}, nil)
+	when := time.Unix(123, 456)
+	s.Touch(when)
+	if got := s.LastActivity(); !got.Equal(when) {
+		t.Fatalf("activity = %v", got)
+	}
+}

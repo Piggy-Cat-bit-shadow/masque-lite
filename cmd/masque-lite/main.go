@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	stdhttp "net/http"
 	"net/netip"
 	neturl "net/url"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/config"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/hostnet"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/packet"
+	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/quicstate"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/session"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/tunnel"
 	connectip "github.com/metacubex/connect-ip-go"
@@ -61,6 +64,10 @@ func run() error {
 	if err := hostnet.CheckIPv4Forwarding(); err != nil {
 		return err
 	}
+	resetKey, err := quicstate.LoadOrCreate(c.QUIC.StatelessResetKeyFile)
+	if err != nil {
+		return err
+	}
 	clients, err := c.ResolvedClients()
 	if err != nil {
 		return err
@@ -100,11 +107,11 @@ func run() error {
 	if err = tun.Configure(serverPrefix); err != nil {
 		return fmt.Errorf("configure masque0: %w", err)
 	}
-	ln, err := net.ListenPacket("udp", c.Listen)
+	packetConn, err := net.ListenPacket("udp", c.Listen)
 	if err != nil {
 		return err
 	}
-	defer ln.Close()
+	defer packetConn.Close()
 	var mgr *session.Manager
 	if c.Server.SessionNat.Enabled {
 		pool, _ := netip.ParsePrefix(c.Server.SessionNat.Pool)
@@ -122,9 +129,22 @@ func run() error {
 	fatal := make(chan error, 2)
 	go tunDispatcher(tun, mgr, c.Server.MTU, fatal)
 	qc := &quic.Config{EnableDatagrams: true, HandshakeIdleTimeout: 10 * time.Second, MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 15 * time.Second, MaxIncomingStreams: 32}
+	transport := &quic.Transport{Conn: packetConn, StatelessResetKey: &resetKey}
+	ql, err := transport.Listen(http3.ConfigureTLSConfig(tc), qc)
+	if err != nil {
+		return err
+	}
+	defer ql.Close()
+	defer transport.Close()
 	s := &http3.Server{TLSConfig: tc, QUICConfig: qc, EnableDatagrams: true, Handler: mh.HandlerFunc(func(w mh.ResponseWriter, r *mh.Request) { handleRequest(w, r, c, byKey, mgr, tun) })}
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- s.Serve(ln) }()
+	go func() { serveErr <- s.ServeListener(ql) }()
+	appCtx, stopReaper := context.WithCancel(context.Background())
+	defer stopReaper()
+	idleTimeout, _ := time.ParseDuration(c.Server.SessionIdleTimeout)
+	if idleTimeout > 0 {
+		go sessionReaper(appCtx, mgr, idleTimeout)
+	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sig)
@@ -132,7 +152,7 @@ func run() error {
 	select {
 	case <-sig:
 	case runErr = <-serveErr:
-		if runErr == net.ErrClosed {
+		if isServerClosed(runErr) {
 			runErr = nil
 		}
 	case runErr = <-fatal:
@@ -141,12 +161,48 @@ func run() error {
 	for _, cl := range mgr.Snapshot() {
 		cl.Close()
 	}
+	stopReaper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err = s.Shutdown(ctx); err != nil {
 		_ = s.Close()
 	}
 	return runErr
+}
+
+func isServerClosed(err error) bool {
+	return errors.Is(err, stdhttp.ErrServerClosed) || errors.Is(err, quic.ErrServerClosed) || errors.Is(err, net.ErrClosed)
+}
+
+func sessionReaper(ctx context.Context, mgr *session.Manager, timeout time.Duration) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			reapIdle(mgr, now, timeout)
+		}
+	}
+}
+
+func reapIdle(mgr *session.Manager, now time.Time, timeout time.Duration) int {
+	if timeout <= 0 {
+		return 0
+	}
+	closed := 0
+	for _, s := range mgr.Snapshot() {
+		if now.Sub(s.LastActivity()) < timeout {
+			continue
+		}
+		if now.Sub(s.LastActivity()) >= timeout {
+			s.SetCloseReason("idle-timeout")
+			s.Close()
+			closed++
+		}
+	}
+	return closed
 }
 
 func handleRequest(w mh.ResponseWriter, r *mh.Request, c config.Config, byKey map[string]config.ResolvedClient, mgr *session.Manager, tun *tunnel.Device) {
@@ -296,6 +352,7 @@ func sessionWriter(s *session.Session, tun *tunnel.Device, mtu int) {
 				s.Close()
 				return
 			}
+			s.Touch(time.Now())
 		}
 	}
 }
@@ -339,6 +396,7 @@ func sessionReader(s *session.Session, tun *tunnel.Device, mgr *session.Manager,
 			s.Close()
 			return
 		}
+		s.Touch(time.Now())
 	}
 }
 func protocolForParse(protocol string) (string, bool) {

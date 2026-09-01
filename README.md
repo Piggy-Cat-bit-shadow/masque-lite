@@ -15,6 +15,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o mas
 
 `keygen` emits a P-256 client key pair. Its `private-key` is base64-encoded SEC1 ASN.1 DER and goes directly in Mihomo's `private-key`. Its `public-key` is an uncompressed P-256 key and goes in the server `config.yaml` `client.public_keys` whitelist.
 
+The server persists its QUIC Stateless Reset Key at `/var/lib/masque-lite/stateless-reset.key` by default. It is generated once with mode `0600`; do not copy it into logs or client configuration. A restart loads the same key so stale QUIC connections can be reset promptly.
+
 The legacy single-client configuration remains supported. For concurrent devices, use one independent client key and one `/32` per device:
 
 ```yaml
@@ -26,6 +28,7 @@ client:
 server:
   tunnel_ipv4: 192.0.2.1/24
   mtu: 1280
+  session_idle_timeout: 30m
   session_nat:
     enabled: true
     pool: 192.0.2.128/25
@@ -129,7 +132,9 @@ server:
 
 Each session receives a unique internal shadow address from the pool. Packets are rewritten at the TUN boundary so Linux conntrack can distinguish concurrent flows; the visible Mihomo configuration remains unchanged. Shadow addresses are cooled down for `reuse_delay` after close so stale conntrack packets are not delivered to a new session. The pool must be inside the server network, must not contain the server address, and must leave room for network/broadcast addresses. `max_sessions` defaults to 120 and is capped at 4096.
 
-Before replacing a running binary, use the configuration-only preflight (it does not create a TUN, listen, or change host state):
+`server.session_idle_timeout` defaults to `30m`. It counts only successfully forwarded CONNECT-IP IPv4 packets, not QUIC keepalive or PING traffic. Set it to `0` to disable business-session idle reclamation. A single global reaper checks sessions once per minute.
+
+Before replacing a running binary, use the configuration-only preflight (it does not create a TUN, listen, or change host state, and does not create the reset-key file):
 
 ```sh
 masque-lite check-config -config /etc/masque-lite/config.yaml

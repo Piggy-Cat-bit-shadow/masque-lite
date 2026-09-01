@@ -3,7 +3,10 @@ package main
 import (
 	"encoding/binary"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/packet"
+	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/session"
+	"net/netip"
 	"testing"
+	"time"
 )
 
 func TestProtocolForParse(t *testing.T) {
@@ -28,6 +31,30 @@ func TestRequestTemplateRejectsMalformedAuthority(t *testing.T) {
 	if err != nil || template == nil {
 		t.Fatalf("valid authority rejected: %v", err)
 	}
+}
+
+type testPacketConn struct{}
+
+func (testPacketConn) ReadPacket() ([]byte, error)        { return nil, nil }
+func (testPacketConn) WritePacket([]byte) ([]byte, error) { return nil, nil }
+func (testPacketConn) Close() error                       { return nil }
+
+func TestReapIdleSessions(t *testing.T) {
+	m := session.NewShadowManager(netip.MustParsePrefix("192.0.2.128/29"), 2, nil)
+	idle := session.New(netip.MustParseAddr("192.0.2.2"), "idle", testPacketConn{}, func(s *session.Session) { m.RemoveIfCurrent(s) })
+	active := session.New(netip.MustParseAddr("192.0.2.2"), "active", testPacketConn{}, func(s *session.Session) { m.RemoveIfCurrent(s) })
+	m.Register(idle)
+	m.Register(active)
+	now := time.Unix(1000, 0)
+	idle.Touch(now.Add(-time.Hour))
+	active.Touch(now.Add(-time.Minute))
+	if got := reapIdle(m, now, 30*time.Minute); got != 1 || m.Len() != 1 || m.Lookup(active.ShadowIP) != active {
+		t.Fatalf("reap result=%d len=%d", got, m.Len())
+	}
+	if idle.CloseReason() != "idle-timeout" {
+		t.Fatal("idle reason missing")
+	}
+	active.Close()
 }
 
 func TestIPv4PacketValidation(t *testing.T) {
