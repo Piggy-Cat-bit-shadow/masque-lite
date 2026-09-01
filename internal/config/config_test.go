@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestValidate(t *testing.T) {
 	c := Config{Listen: "127.0.0.1:4433", TLS: TLS{Cert: "c", Key: "k"}, Client: Client{PublicKeys: []string{"BIU3CobtJ5y6P+wvKc7M1XBfS5FhcvLeVkPhObW4s5QY4UvNYuKxtYrZF+4eCxv2AW4OmvowLmN1v6CQVsJ+f9M="}, TunnelIPv4: "192.0.2.2/32"}, Server: Server{TunnelIPv4: "192.0.2.1/30"}}
@@ -10,6 +14,32 @@ func TestValidate(t *testing.T) {
 	c.Server.TunnelIPv4 = "::1/128"
 	if e := c.Validate(); e == nil {
 		t.Fatal("expected IPv6 rejection")
+	}
+}
+
+func TestLoadSessionIdleTimeoutDefaultAndDisable(t *testing.T) {
+	key := "BIU3CobtJ5y6P+wvKc7M1XBfS5FhcvLeVkPhObW4s5QY4UvNYuKxtYrZF+4eCxv2AW4OmvowLmN1v6CQVsJ+f9M="
+	base := "listen: 127.0.0.1:4433\ntls:\n  cert: c\n  key: k\nclient:\n  public_keys: [" + key + "]\n  tunnel_ipv4: 192.0.2.2/32\nserver:\n  tunnel_ipv4: 192.0.2.1/30\n"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.SessionIdleTimeout != "1h" {
+		t.Fatalf("default idle timeout = %q", c.Server.SessionIdleTimeout)
+	}
+	if err := os.WriteFile(path, []byte(base+"  session_idle_timeout: 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.SessionIdleTimeout != "0" {
+		t.Fatalf("disabled idle timeout = %q", c.Server.SessionIdleTimeout)
 	}
 }
 

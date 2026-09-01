@@ -28,7 +28,7 @@ client:
 server:
   tunnel_ipv4: 192.0.2.1/24
   mtu: 1280
-  session_idle_timeout: 30m
+  session_idle_timeout: 1h
   session_nat:
     enabled: true
     pool: 192.0.2.128/25
@@ -132,7 +132,7 @@ server:
 
 Each session receives a unique internal shadow address from the pool. Packets are rewritten at the TUN boundary so Linux conntrack can distinguish concurrent flows; the visible Mihomo configuration remains unchanged. Shadow addresses are cooled down for `reuse_delay` after close so stale conntrack packets are not delivered to a new session. The pool must be inside the server network, must not contain the server address, and must leave room for network/broadcast addresses. `max_sessions` defaults to 120 and is capped at 4096.
 
-`server.session_idle_timeout` defaults to `30m`. It counts only successfully forwarded CONNECT-IP IPv4 packets, not QUIC keepalive or PING traffic. Set it to `0` to disable business-session idle reclamation. A single global reaper checks sessions once per minute.
+`server.session_idle_timeout` defaults to `1h`. It counts only successfully forwarded CONNECT-IP IPv4 packets, not QUIC keepalive or PING traffic. Set it to `0` to disable business-session idle reclamation. A single global reaper checks sessions once per minute and rechecks activity immediately before closing a session.
 
 Before replacing a running binary, use the configuration-only preflight (it does not create a TUN, listen, or change host state, and does not create the reset-key file):
 

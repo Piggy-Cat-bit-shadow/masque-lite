@@ -65,7 +65,7 @@ func Load(path string) (Config, error) {
 		c.QUIC.StatelessResetKeyFile = "/var/lib/masque-lite/stateless-reset.key"
 	}
 	if c.Server.SessionIdleTimeout == "" {
-		c.Server.SessionIdleTimeout = "30m"
+		c.Server.SessionIdleTimeout = "1h"
 	}
 	if c.Server.SessionNat.Enabled && c.Server.SessionNat.MaxSessions == 0 {
 		c.Server.SessionNat.MaxSessions = 120
@@ -87,7 +87,7 @@ func (c Config) Validate() error {
 	}
 	idleTimeout := c.Server.SessionIdleTimeout
 	if idleTimeout == "" {
-		idleTimeout = "30m"
+		idleTimeout = "1h"
 	}
 	if _, e := time.ParseDuration(idleTimeout); e != nil {
 		return fmt.Errorf("invalid server.session_idle_timeout")
