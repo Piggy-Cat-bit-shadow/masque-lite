@@ -40,6 +40,9 @@ func TestManagerQueueIsBounded(t *testing.T) {
 	m := NewManager()
 	s := New(netip.MustParseAddr("192.0.2.2"), "a", &fakeConn{}, func(x *Session) { m.RemoveIfCurrent(x) })
 	m.Replace(s)
+	if cap(s.Outbound) != DefaultOutboundQueueSize {
+		t.Fatalf("queue capacity = %d, want %d", cap(s.Outbound), DefaultOutboundQueueSize)
+	}
 	for i := 0; i < cap(s.Outbound); i++ {
 		s.Outbound <- []byte{1}
 	}
@@ -153,4 +156,33 @@ func TestSessionActivity(t *testing.T) {
 	if got := s.LastActivity(); !got.Equal(when) {
 		t.Fatalf("activity = %v", got)
 	}
+}
+
+func TestShadowCleanupFailureStillCoolsAddress(t *testing.T) {
+	now := time.Unix(100, 0)
+	m := NewShadowManagerWithClock(netip.MustParsePrefix("192.0.2.128/30"), 1, nil, time.Hour, func() time.Time { return now }, func(uint32) uint32 { return 0 })
+	called := make(chan netip.Addr, 1)
+	m.SetShadowCleanup(func(ip netip.Addr) error { called <- ip; return errors.New("cleanup failed") })
+	s := New(netip.MustParseAddr("192.0.2.2"), "test", &fakeConn{}, func(x *Session) { m.RemoveIfCurrent(x) })
+	if err := m.Register(s); err != nil {
+		t.Fatal(err)
+	}
+	shadow := s.ShadowIP
+	s.Close()
+	select {
+	case got := <-called:
+		if got != shadow {
+			t.Fatalf("cleanup address = %s", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cleanup was not scheduled")
+	}
+	next := New(netip.MustParseAddr("192.0.2.2"), "next", &fakeConn{}, func(x *Session) { m.RemoveIfCurrent(x) })
+	if err := m.Register(next); err != nil {
+		t.Fatal(err)
+	}
+	if next.ShadowIP == shadow {
+		t.Fatal("cooling address was reused after cleanup failure")
+	}
+	next.Close()
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/auth"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/config"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/hostnet"
+	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/notify"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/packet"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/quicstate"
 	"github.com/Piggy-Cat-bit-shadow/masque-lite/internal/session"
@@ -126,6 +127,15 @@ func run() error {
 	} else {
 		mgr = session.NewManager()
 	}
+	if mgr.IsShadow() {
+		mgr.SetShadowCleanup(func(ip netip.Addr) error {
+			if err := hostnet.CleanupConntrack(ip); err != nil {
+				log.Printf("shadow=%s conntrack cleanup failed: %v", ip, err)
+				return err
+			}
+			return nil
+		})
+	}
 	fatal := make(chan error, 2)
 	go tunDispatcher(tun, mgr, c.Server.MTU, fatal)
 	qc := &quic.Config{EnableDatagrams: true, HandshakeIdleTimeout: 10 * time.Second, MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 15 * time.Second, MaxIncomingStreams: 32}
@@ -136,6 +146,24 @@ func run() error {
 	}
 	defer ql.Close()
 	defer transport.Close()
+	externalInterface := c.HostNetwork.ExternalInterface
+	if externalInterface == "" {
+		externalInterface, err = hostnet.DefaultExternalInterface()
+		if err != nil {
+			return fmt.Errorf("detect external interface: %w", err)
+		}
+	}
+	checkInterval, _ := time.ParseDuration(c.HostNetwork.CheckInterval)
+	probe := hostnet.Probe{
+		TunnelName: "masque0", TunnelPrefix: serverPrefix, TunnelMTU: c.Server.MTU,
+		ExternalInterface: externalInterface,
+		TunnelCheck:       tunnel.CheckInterface,
+		ForwardingCheck:   hostnet.CheckIPv4Forwarding,
+		NATCheck:          hostnet.CheckNAT,
+	}
+	if err := probe.Check(); err != nil {
+		return fmt.Errorf("data-plane unhealthy: %w", err)
+	}
 	s := &http3.Server{TLSConfig: tc, QUICConfig: qc, EnableDatagrams: true, Handler: mh.HandlerFunc(func(w mh.ResponseWriter, r *mh.Request) { handleRequest(w, r, c, byKey, mgr, tun) })}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.ServeListener(ql) }()
@@ -144,6 +172,11 @@ func run() error {
 	idleTimeout, _ := time.ParseDuration(c.Server.SessionIdleTimeout)
 	if idleTimeout > 0 {
 		go sessionReaper(appCtx, mgr, idleTimeout)
+	}
+	supervisor := hostnet.Supervisor{Probe: probe, Interval: checkInterval}
+	go supervisor.Run(appCtx, fatal, func() { _ = notify.Send("WATCHDOG=1") })
+	if err := notify.Send("READY=1"); err != nil {
+		log.Printf("systemd notify failed: %v", err)
 	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

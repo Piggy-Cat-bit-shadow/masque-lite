@@ -41,6 +41,9 @@ func TestLoadSessionIdleTimeoutDefaultAndDisable(t *testing.T) {
 	if c.Server.SessionIdleTimeout != "0" {
 		t.Fatalf("disabled idle timeout = %q", c.Server.SessionIdleTimeout)
 	}
+	if c.HostNetwork.CheckInterval != "10s" {
+		t.Fatalf("default check interval = %q", c.HostNetwork.CheckInterval)
+	}
 }
 
 func TestMultiClientValidation(t *testing.T) {

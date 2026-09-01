@@ -16,6 +16,9 @@ type PacketConn interface {
 	WritePacket([]byte) ([]byte, error)
 	Close() error
 }
+
+const DefaultOutboundQueueSize = 512
+
 type Session struct {
 	ID           uint64
 	ClientIP     netip.Addr
@@ -50,7 +53,7 @@ func New(ip netip.Addr, identity string, conn PacketConn, onClose func(*Session)
 }
 func NewWithContext(parent context.Context, ip netip.Addr, identity string, conn PacketConn, onClose func(*Session)) *Session {
 	ctx, cancel := context.WithCancel(parent)
-	s := &Session{ClientIP: ip, VisibleIP: ip, Identity: identity, Conn: conn, Ctx: ctx, Cancel: cancel, Outbound: make(chan []byte, 128), onClose: onClose}
+	s := &Session{ClientIP: ip, VisibleIP: ip, Identity: identity, Conn: conn, Ctx: ctx, Cancel: cancel, Outbound: make(chan []byte, DefaultOutboundQueueSize), onClose: onClose}
 	s.Touch(time.Now())
 	return s
 }
@@ -83,6 +86,7 @@ type Manager struct {
 	now              func() time.Time
 	random           func(uint32) uint32
 	reuseDelay       time.Duration
+	cleanup          func(netip.Addr) error
 }
 
 func NewManager() *Manager { return &Manager{sessions: map[netip.Addr]*Session{}} }
@@ -211,22 +215,32 @@ func (m *Manager) Replace(s *Session) (old *Session) {
 }
 func (m *Manager) RemoveIfCurrent(s *Session) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.shadow {
 		if m.sessionsByID[s.ID] != s {
+			m.mu.Unlock()
 			return false
 		}
 		delete(m.sessionsByID, s.ID)
 		delete(m.sessionsByShadow, s.ShadowIP)
+		cleanup := m.cleanup
+		shadowIP := s.ShadowIP
 		if m.reuseDelay > 0 {
-			m.cooling[s.ShadowIP] = m.now().Add(m.reuseDelay)
+			m.cooling[shadowIP] = m.now().Add(m.reuseDelay)
+		}
+		m.mu.Unlock()
+		if cleanup != nil {
+			go func() {
+				_ = cleanup(shadowIP)
+			}()
 		}
 		return true
 	}
 	if m.sessions[s.ClientIP] != s {
+		m.mu.Unlock()
 		return false
 	}
 	delete(m.sessions, s.ClientIP)
+	m.mu.Unlock()
 	return true
 }
 func (m *Manager) Lookup(ip netip.Addr) *Session {
@@ -269,6 +283,12 @@ func (m *Manager) IsShadowAddress(ip netip.Addr) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.shadow && m.shadowPool.Contains(ip)
+}
+
+func (m *Manager) SetShadowCleanup(cleanup func(netip.Addr) error) {
+	m.mu.Lock()
+	m.cleanup = cleanup
+	m.mu.Unlock()
 }
 
 func ipv4Value(ip netip.Addr) uint32 {

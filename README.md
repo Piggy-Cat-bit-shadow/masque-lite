@@ -77,17 +77,16 @@ proxies:
 
 ## Linux deployment
 
-Install the binary, certificates, config, and `contrib/masque-lite.service`; create a `masque-lite` user and grant only `CAP_NET_ADMIN`. Ensure `/dev/net/tun` exists, then configure networking explicitly:
+Install the binary, certificates, config, `contrib/masque-lite.service`, and `contrib/masque-lite-network-prepare` as `/usr/local/libexec/masque-lite-network-prepare`; create a `masque-lite` user and grant only `CAP_NET_ADMIN`. Ensure `/dev/net/tun` exists. The service pre-start helper is idempotent, touches only its own `ip masque_lite` nft table, enables IPv4 forwarding, and creates the MASQUERADE rule from `server.tunnel_ipv4`. Set `host_network.external_interface` (or `MASQUE_EXTERNAL_INTERFACE` in `/etc/masque-lite/host-network.env`) to the public interface:
 
 ```sh
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo nft add table ip masque_lite
-sudo nft 'add chain ip masque_lite postrouting { type nat hook postrouting priority srcnat; policy accept; }'
-sudo nft add rule ip masque_lite postrouting oifname "eth0" ip saddr 192.0.2.0/24 masquerade
+sudo install -m 0755 contrib/masque-lite-network-prepare /usr/local/libexec/masque-lite-network-prepare
+sudo install -m 0644 contrib/masque-lite.service /etc/systemd/system/masque-lite.service
+sudo systemctl daemon-reload
 sudo systemctl enable --now masque-lite
 ```
 
-Replace `eth0` as needed. The forwarding firewall and MASQUERADE rule must cover the complete server network, including the shadow pool (`192.0.2.0/24` in this example). At startup, masque-lite configures `masque0` itself from `server.tunnel_ipv4` and `server.mtu`, including the IPv4 address, netmask, MTU, and UP flag. The service checks that `/proc/sys/net/ipv4/ip_forward` is `1`, but does not modify sysctl or firewall state.
+Replace `eth0` as needed. The forwarding firewall must cover the complete server network, including the shadow pool (`192.0.2.0/24` in this example). At startup, masque-lite configures `masque0` itself from `server.tunnel_ipv4` and `server.mtu`, including the IPv4 address, netmask, MTU, and UP flag. The helper does not flush unrelated nft tables or modify persistent sysctl configuration.
 
 The legacy `client` block remains supported:
 
@@ -116,6 +115,8 @@ server:
 ```
 
 Do not configure both blocks. The service uses one TUN reader and bounded per-session queues, and does not implement a userspace TCP/IP stack.
+
+At runtime a small supervisor checks IPv4 forwarding, `masque0`, MTU/address state, and the owned MASQUERADE rule every 10 seconds. After two consecutive failed checks it exits so systemd can restart it. Under systemd it reports `READY=1` only after the listener and these data-plane prerequisites are healthy, then emits watchdog heartbeats; outside systemd notification is a no-op. Shared-session shadow addresses are cooled down and their conntrack entries are deleted asynchronously on close, so cleanup cannot delay session shutdown.
 
 The shared-profile mode is the recommended production data plane for multiple users/devices sharing one Mihomo profile:
 

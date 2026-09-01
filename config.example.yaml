@@ -6,6 +6,10 @@ tls:
   key: /etc/masque-lite/server.key
 quic:
   stateless_reset_key_file: /var/lib/masque-lite/stateless-reset.key
+host_network:
+  # Optional; otherwise the default-route interface is detected.
+  external_interface: eth0
+  check_interval: 10s
 client:
   public_keys: []
   tunnel_ipv4: 192.0.2.2/32

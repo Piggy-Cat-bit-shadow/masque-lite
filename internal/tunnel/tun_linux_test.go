@@ -47,10 +47,7 @@ func TestOpenTunFDSetupOrder(t *testing.T) {
 			events = append(events, "newfile")
 			return os.NewFile(gotFD, name)
 		},
-		close: func(gotFD int) error {
-			events = append(events, "close")
-			return unix.Close(gotFD)
-		},
+		close: func(gotFD int) error { events = append(events, "close"); return unix.Close(gotFD) },
 	}
 	d, err := openTun("masque0", 1280, ops)
 	if err != nil {
@@ -75,10 +72,7 @@ func TestOpenTunFDSetupOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	readDone := make(chan error, 1)
-	go func() {
-		_, err := d.Read(make([]byte, 1))
-		readDone <- err
-	}()
+	go func() { _, err := d.Read(make([]byte, 1)); readDone <- err }()
 	if err := d.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -94,11 +88,9 @@ func TestOpenTunFDSetupOrder(t *testing.T) {
 
 func TestOpenTunClosesFDOnSetupErrors(t *testing.T) {
 	tests := []struct {
-		name        string
-		deviceName  string
-		ioctlErr    error
-		nonblockErr error
-		newFileNil  bool
+		name, deviceName      string
+		ioctlErr, nonblockErr error
+		newFileNil            bool
 	}{
 		{name: "ifreq", deviceName: "interface-name-too-long"},
 		{name: "ioctl", deviceName: "masque0", ioctlErr: errors.New("ioctl")},

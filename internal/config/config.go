@@ -11,15 +11,20 @@ import (
 )
 
 type Config struct {
-	Listen  string   `yaml:"listen"`
-	TLS     TLS      `yaml:"tls"`
-	QUIC    QUIC     `yaml:"quic"`
-	Client  Client   `yaml:"client"`
-	Clients []Client `yaml:"clients,omitempty"`
-	Server  Server   `yaml:"server"`
+	Listen      string      `yaml:"listen"`
+	TLS         TLS         `yaml:"tls"`
+	QUIC        QUIC        `yaml:"quic"`
+	HostNetwork HostNetwork `yaml:"host_network,omitempty"`
+	Client      Client      `yaml:"client"`
+	Clients     []Client    `yaml:"clients,omitempty"`
+	Server      Server      `yaml:"server"`
 }
 type QUIC struct {
 	StatelessResetKeyFile string `yaml:"stateless_reset_key_file"`
+}
+type HostNetwork struct {
+	ExternalInterface string `yaml:"external_interface"`
+	CheckInterval     string `yaml:"check_interval"`
 }
 type TLS struct {
 	Cert string `yaml:"cert"`
@@ -67,6 +72,9 @@ func Load(path string) (Config, error) {
 	if c.Server.SessionIdleTimeout == "" {
 		c.Server.SessionIdleTimeout = "1h"
 	}
+	if c.HostNetwork.CheckInterval == "" {
+		c.HostNetwork.CheckInterval = "10s"
+	}
 	if c.Server.SessionNat.Enabled && c.Server.SessionNat.MaxSessions == 0 {
 		c.Server.SessionNat.MaxSessions = 120
 	}
@@ -94,6 +102,16 @@ func (c Config) Validate() error {
 	}
 	if d, _ := time.ParseDuration(idleTimeout); d < 0 {
 		return fmt.Errorf("server.session_idle_timeout must not be negative")
+	}
+	checkInterval := c.HostNetwork.CheckInterval
+	if checkInterval == "" {
+		checkInterval = "10s"
+	}
+	if _, e := time.ParseDuration(checkInterval); e != nil {
+		return fmt.Errorf("invalid host_network.check_interval")
+	}
+	if d, _ := time.ParseDuration(checkInterval); d <= 0 {
+		return fmt.Errorf("host_network.check_interval must be positive")
 	}
 	if _, e := c.ResolvedClients(); e != nil {
 		return e
