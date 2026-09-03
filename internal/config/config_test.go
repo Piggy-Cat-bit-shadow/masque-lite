@@ -1,13 +1,26 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
+func testPublicKey(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(elliptic.Marshal(elliptic.P256(), key.PublicKey.X, key.PublicKey.Y))
+}
+
 func TestValidate(t *testing.T) {
-	c := Config{Listen: "127.0.0.1:4433", TLS: TLS{Cert: "c", Key: "k"}, Client: Client{PublicKeys: []string{"BIU3CobtJ5y6P+wvKc7M1XBfS5FhcvLeVkPhObW4s5QY4UvNYuKxtYrZF+4eCxv2AW4OmvowLmN1v6CQVsJ+f9M="}, TunnelIPv4: "192.0.2.2/32"}, Server: Server{TunnelIPv4: "192.0.2.1/30"}}
+	c := Config{Listen: "127.0.0.1:4433", TLS: TLS{Cert: "c", Key: "k"}, Client: Client{PublicKeys: []string{testPublicKey(t)}, TunnelIPv4: "192.0.2.2/32"}, Server: Server{TunnelIPv4: "192.0.2.1/30"}}
 	if e := c.Validate(); e != nil {
 		t.Fatal(e)
 	}
@@ -18,7 +31,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestLoadSessionIdleTimeoutDefaultAndDisable(t *testing.T) {
-	key := "BIU3CobtJ5y6P+wvKc7M1XBfS5FhcvLeVkPhObW4s5QY4UvNYuKxtYrZF+4eCxv2AW4OmvowLmN1v6CQVsJ+f9M="
+	key := testPublicKey(t)
 	base := "listen: 127.0.0.1:4433\ntls:\n  cert: c\n  key: k\nclient:\n  public_keys: [" + key + "]\n  tunnel_ipv4: 192.0.2.2/32\nserver:\n  tunnel_ipv4: 192.0.2.1/30\n"
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
@@ -47,8 +60,8 @@ func TestLoadSessionIdleTimeoutDefaultAndDisable(t *testing.T) {
 }
 
 func TestMultiClientValidation(t *testing.T) {
-	keyA := "BIU3CobtJ5y6P+wvKc7M1XBfS5FhcvLeVkPhObW4s5QY4UvNYuKxtYrZF+4eCxv2AW4OmvowLmN1v6CQVsJ+f9M="
-	keyB := "BJVHqCpze4DJd2ZMvQDENmffhP3y1iW9t63vgbGvZ2mCC9kAmupPlruK5JYN8ZpAOFBTQ9zetFSFbPIBH3mWbgA="
+	keyA := testPublicKey(t)
+	keyB := testPublicKey(t)
 	c := Config{Listen: "127.0.0.1:4433", TLS: TLS{Cert: "c", Key: "k"}, Clients: []Client{{Name: "iphone", PublicKeys: []string{keyA}, TunnelIPv4: "192.0.2.2/32"}, {Name: "mac", PublicKeys: []string{keyB}, TunnelIPv4: "192.0.2.3/32"}}, Server: Server{TunnelIPv4: "192.0.2.1/24", MTU: 1280}}
 	clients, err := c.ResolvedClients()
 	if err != nil || len(clients) != 2 {
@@ -71,7 +84,7 @@ func TestMultiClientValidation(t *testing.T) {
 }
 
 func TestSessionNatValidation(t *testing.T) {
-	key := "BIU3CobtJ5y6P+wvKc7M1XBfS5FhcvLeVkPhObW4s5QY4UvNYuKxtYrZF+4eCxv2AW4OmvowLmN1v6CQVsJ+f9M="
+	key := testPublicKey(t)
 	c := Config{
 		Listen: "127.0.0.1:4433",
 		TLS:    TLS{Cert: "c", Key: "k"},

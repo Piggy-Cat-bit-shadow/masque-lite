@@ -67,7 +67,7 @@ proxies:
   - name: MASQUE-Lite
     type: masque
     server: example.com
-    port: 4433
+    port: 443
     private-key: BASE64_P256_CLIENT_PRIVATE_KEY
     public-key: BASE64_P256_SERVER_CERT_PUBLIC_KEY
     ip: 192.0.2.2/32
