@@ -53,25 +53,54 @@ func TestValidateExistingDoesNotCreate(t *testing.T) {
 
 func TestLoadOrCreateDoesNotOverwriteConcurrentWinner(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "reset.key")
-	results := make(chan [32]byte, 2)
-	errs := make(chan error, 2)
-	for i := 0; i < 2; i++ {
+	type result struct {
+		key [32]byte
+		err error
+	}
+	results := make(chan result, 16)
+	for i := 0; i < cap(results); i++ {
 		go func() {
 			key, err := LoadOrCreate(path)
-			results <- [32]byte(key)
-			errs <- err
+			results <- result{key: [32]byte(key), err: err}
 		}()
 	}
 	var key [32]byte
-	for i := 0; i < 2; i++ {
-		if err := <-errs; err != nil {
-			t.Fatal(err)
-		}
+	for i := 0; i < cap(results); i++ {
 		got := <-results
-		if i > 0 && got != key {
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if i > 0 && got.key != key {
 			t.Fatal("concurrent loaders got different keys")
 		}
-		key = got
+		key = got.key
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) != ResetKeySize {
+		t.Fatalf("final key length = %d, err = %v", len(b), err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("final mode = %v, err = %v", info.Mode().Perm(), err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".reset-key-*")); err != nil || len(matches) != 0 {
+		t.Fatalf("temporary files = %v, err = %v", matches, err)
+	}
+}
+
+func TestLoadOrCreatePreservesExistingWinner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reset.key")
+	want := make([]byte, ResetKeySize)
+	for i := range want {
+		want[i] = byte(i)
+	}
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 16; i++ {
+		got, err := LoadOrCreate(path)
+		if err != nil || string(got[:]) != string(want) {
+			t.Fatalf("got existing key: err=%v", err)
+		}
 	}
 }
 

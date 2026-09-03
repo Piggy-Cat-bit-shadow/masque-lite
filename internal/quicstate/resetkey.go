@@ -3,6 +3,7 @@ package quicstate
 import (
 	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -37,15 +38,22 @@ func LoadOrCreate(path string) (quic.StatelessResetKey, error) {
 	if _, err := rand.Read(key[:]); err != nil {
 		return key, fmt.Errorf("generate stateless reset key: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.CreateTemp(filepath.Dir(path), ".reset-key-*")
 	if err != nil {
-		if os.IsExist(err) {
-			return LoadOrCreate(path)
-		}
 		return key, fmt.Errorf("create stateless reset key: %w", err)
 	}
-	if _, err = f.Write(key[:]); err != nil {
+	tempPath := f.Name()
+	defer os.Remove(tempPath)
+	if err = f.Chmod(0o600); err != nil {
 		_ = f.Close()
+		return key, fmt.Errorf("chmod stateless reset key: %w", err)
+	}
+	n, err := f.Write(key[:])
+	if err != nil || n != len(key) {
+		_ = f.Close()
+		if err == nil {
+			err = io.ErrShortWrite
+		}
 		return key, fmt.Errorf("write stateless reset key: %w", err)
 	}
 	if err = f.Sync(); err != nil {
@@ -55,11 +63,12 @@ func LoadOrCreate(path string) (quic.StatelessResetKey, error) {
 	if err = f.Close(); err != nil {
 		return key, fmt.Errorf("close stateless reset key: %w", err)
 	}
-	confirmed, err := os.ReadFile(path)
-	if err != nil || len(confirmed) != ResetKeySize {
-		return key, fmt.Errorf("confirm stateless reset key: %w", err)
+	if err = os.Link(tempPath, path); err != nil {
+		if os.IsExist(err) {
+			return LoadOrCreate(path)
+		}
+		return key, fmt.Errorf("publish stateless reset key: %w", err)
 	}
-	copy(key[:], confirmed)
 	return key, nil
 }
 
